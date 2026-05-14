@@ -3,8 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from app.api.router import api_router
 from app.config import settings
@@ -18,11 +17,17 @@ from app.middleware.logging_middleware import RequestLoggingMiddleware
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
     setup_logging()
-    # TODO: initialize Redis connection pool
-    # TODO: initialize S3 client
+
+    if settings.redis_enabled:
+        pass  # TODO: initialize Redis connection pool
+
+    if settings.storage_enabled:
+        pass  # TODO: initialize S3 client
+
     yield
-    # TODO: close Redis connection pool
-    # TODO: close S3 client
+
+    if settings.redis_enabled:
+        pass  # TODO: close Redis connection pool
 
 
 def create_app() -> FastAPI:
