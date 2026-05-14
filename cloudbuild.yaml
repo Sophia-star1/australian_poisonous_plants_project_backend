@@ -49,5 +49,8 @@ substitutions:
   _REGION: asia-southeast1
   _REPO_NAME: apl-backend
 
+options:
+  logging: CLOUD_LOGGING_ONLY
+
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
