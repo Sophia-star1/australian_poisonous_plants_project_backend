@@ -1,0 +1,53 @@
+# Google Cloud Build configuration for Cloud Run deployment
+
+steps:
+  # Build the Docker image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
+      - "."
+
+  # Push the image to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
+
+  # Deploy to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE_NAME}"
+      - "--image"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
+      - "--region"
+      - "${_REGION}"
+      - "--platform"
+      - "managed"
+      - "--port"
+      - "8000"
+      - "--allow-unauthenticated"
+      - "--min-instances"
+      - "0"
+      - "--max-instances"
+      - "10"
+      - "--memory"
+      - "512Mi"
+      - "--cpu"
+      - "1"
+      - "--set-env-vars"
+      - "APP_NAME=${_SERVICE_NAME},DEBUG=false"
+      - "--set-secrets"
+      - "SECRET_KEY=secret-key:latest,DATABASE_URL=database-url:latest"
+
+substitutions:
+  _SERVICE_NAME: apl-backend
+  _REGION: asia-southeast1
+  _REPO_NAME: apl-backend
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"

@@ -1,0 +1,19 @@
+# Files not needed in Cloud Build context
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+.env.local
+*.md
+tests/
+k8s/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+docker-compose.yml
+.pre-commit-config.yaml

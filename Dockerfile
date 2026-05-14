@@ -5,7 +5,7 @@ WORKDIR /build
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY . .
@@ -23,16 +23,15 @@ COPY --from=builder /build/app ./app
 COPY --from=builder /build/alembic ./alembic
 COPY --from=builder /build/alembic.ini ./alembic.ini
 
-ENV PATH="/app/.venv/bin:$PATH" \
+ENV VIRTUAL_ENV="/app/.venv" \
+    PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8000
 
 USER app
 
 EXPOSE 8000
 
-ENTRYPOINT ["gunicorn", "app.main:app", \
-            "-k", "uvicorn.workers.UvicornWorker", \
-            "--bind", "0.0.0.0:8000", \
-            "--workers", "4", \
-            "--access-logfile", "-"]
+# Use python -m to avoid venv relocation issues with entry-point scripts
+CMD python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
