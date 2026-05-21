@@ -22,6 +22,7 @@ from app.schemas.submission import (
     SubmissionCreate,
     SubmissionFilter,
     SubmissionOut,
+    SubmissionStatus,
     SubmissionUpdate,
 )
 from app.services.submission_service import SubmissionService
@@ -83,7 +84,7 @@ async def list_my_submissions(
 
 @router.get("/", response_model=ApiResponse[PageResult[SubmissionOut]])
 async def list_all_submissions(
-    status: str | None = Query(None, description="Filter: pending, approved, or rejected."),
+    status: SubmissionStatus | None = Query(None, description="Filter: pending, approved, or rejected."),
     contributor_name: str | None = Query(None, description="Case-insensitive substring match."),
     contributor_email: str | None = Query(None, description="Case-insensitive substring match."),
     page: int = Query(1, ge=1),

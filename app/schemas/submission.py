@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 SubmissionStatus = Literal["pending", "approved", "rejected"]
+ReviewAction = Literal["approved", "rejected"]
 
 
 class SubmissionImageOut(BaseModel):
@@ -66,5 +67,5 @@ class SubmissionFilter(BaseModel):
 class SubmissionUpdate(BaseModel):
     """Admin action: approve or reject a submission."""
 
-    status: SubmissionStatus
+    status: ReviewAction
     reviewer_notes: str | None = None
