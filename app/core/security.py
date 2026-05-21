@@ -3,12 +3,10 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.config import settings
-
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def _now() -> datetime:
@@ -52,12 +50,12 @@ def verify_token(token: str) -> dict[str, Any] | None:
 
 def get_password_hash(password: str) -> str:
     """Hash a plaintext password using bcrypt."""
-    return _pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plaintext password against its bcrypt hash."""
     try:
-        return _pwd_context.verify(plain_password, hashed_password)
-    except ValueError:
+        return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+    except Exception:
         return False
