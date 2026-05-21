@@ -8,6 +8,7 @@ class UserCreate(BaseModel):
 
     email: EmailStr
     password: str
+    full_name: str | None = None
     role: str = "user"
 
 
@@ -16,6 +17,7 @@ class UserUpdate(BaseModel):
 
     email: EmailStr | None = None
     password: str | None = None
+    full_name: str | None = None
     is_active: bool | None = None
     role: str | None = None
 
@@ -25,6 +27,7 @@ class UserOut(BaseModel):
 
     id: int
     email: str
+    full_name: str | None = None
     is_active: bool
     role: str
 
