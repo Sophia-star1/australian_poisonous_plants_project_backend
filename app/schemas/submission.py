@@ -51,3 +51,20 @@ class SubmissionOut(BaseModel):
     reviewed_at: datetime | None = None
     submitted_at: datetime
     images: list[SubmissionImageOut] = Field(default_factory=list)
+
+
+class SubmissionFilter(BaseModel):
+    """Query-string filters for the admin submissions list."""
+
+    status: SubmissionStatus | None = None
+    contributor_name: str | None = None
+    contributor_email: str | None = None
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=100)
+
+
+class SubmissionUpdate(BaseModel):
+    """Admin action: approve or reject a submission."""
+
+    status: SubmissionStatus
+    reviewer_notes: str | None = None
