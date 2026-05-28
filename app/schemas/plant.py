@@ -5,9 +5,35 @@ the React Native code can be repointed at this backend with minimal
 type changes.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+SearchableField = Literal[
+    "botanical_name",
+    "family_name",
+    "common_names",
+    "origin_status",
+    "lethality",
+    "toxic_parts",
+    "toxic_to_animals",
+    "distribution_formally_listed",
+    "distribution_observed",
+    "health_effects",
+]
+
+SEARCHABLE_FIELDS: set[str] = {
+    "botanical_name",
+    "family_name",
+    "common_names",
+    "origin_status",
+    "lethality",
+    "toxic_parts",
+    "toxic_to_animals",
+    "distribution_formally_listed",
+    "distribution_observed",
+    "health_effects",
+}
 
 
 class PlantImageOut(BaseModel):
