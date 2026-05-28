@@ -51,3 +51,12 @@ logs/
 # OS
 Thumbs.db
 Desktop.ini
+
+# AI assistant context (local-only — not for GitHub)
+AI_CONTEXT.md
+
+
+.claude/
+CLAUDE.md
+mobile/
+

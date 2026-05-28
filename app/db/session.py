@@ -1,5 +1,6 @@
 """Async database session management."""
 
+import logging
 from collections.abc import AsyncIterator
 from functools import lru_cache
 from uuid import uuid4
@@ -7,6 +8,22 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def _clean_url(raw: str) -> str:
+    """Strip BOM and surrounding whitespace from a DATABASE_URL secret.
+
+    PowerShell on Windows often writes UTF-8 BOM (or trailing \r\n) when
+    creating Secret Manager values, which makes SQLAlchemy's URL parser
+    fail with "Could not parse SQLAlchemy URL from given URL string".
+    Be defensive so a slightly-mangled secret still boots.
+    """
+    if not raw:
+        return raw
+    # UTF-8 BOM (read as one char), UTF-16 BOMs as raw bytes, plus whitespace.
+    return raw.lstrip("﻿").lstrip("ï»¿").strip()
 
 
 def _is_pooler(url: str) -> bool:
@@ -23,14 +40,36 @@ def get_engine():
     statements. We disable asyncpg's cache and give every prepared
     statement a unique name when we detect the pooler.
     """
+    url = _clean_url(settings.DATABASE_URL)
+    # Log the scheme and host so deploy issues are easy to diagnose without
+    # leaking the password.
+    try:
+        from sqlalchemy.engine.url import make_url
+        parsed = make_url(url)
+        logger.info(
+            "DB engine init: dialect=%s host=%s port=%s db=%s",
+            parsed.get_backend_name(),
+            parsed.host,
+            parsed.port,
+            parsed.database,
+        )
+    except Exception as exc:
+        logger.error(
+            "DATABASE_URL appears malformed (length=%d, starts_with=%r): %s",
+            len(url),
+            url[:20] if url else "",
+            exc,
+        )
+        raise
+
     connect_args: dict[str, object] = {}
-    if _is_pooler(settings.DATABASE_URL):
+    if _is_pooler(url):
         connect_args["statement_cache_size"] = 0
         connect_args["prepared_statement_cache_size"] = 0
         connect_args["prepared_statement_name_func"] = lambda: f"__asyncpg_{uuid4()}__"
 
     return create_async_engine(
-        settings.DATABASE_URL,
+        url,
         echo=settings.DEBUG,
         pool_pre_ping=True,
         pool_size=5,
