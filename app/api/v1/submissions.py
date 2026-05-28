@@ -32,7 +32,7 @@ router = APIRouter()
 
 @router.post("/", response_model=ApiResponse[SubmissionOut], status_code=201)
 async def create_submission(
-    photo: UploadFile = File(..., description="Plant photo (jpg/png/webp)."),
+    photos: list[UploadFile] = File(..., description="Plant photos (jpg/png/webp, at least one)."),
     user_description: str = Form(""),
     contributor_name: str = Form(...),
     contributor_email: str = Form(...),
@@ -41,7 +41,14 @@ async def create_submission(
     longitude: float | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[SubmissionOut]:
-    """Create a new observation from the mobile Upload tab."""
+    """Create a new observation from the mobile Upload tab.
+
+    Upload one or more photos under the same `photos` field name.
+    The first photo in the list is marked as the primary image.
+    """
+    if not photos:
+        raise UnprocessableError("At least one photo is required.")
+
     try:
         payload = SubmissionCreate(
             user_description=user_description or None,
@@ -54,7 +61,7 @@ async def create_submission(
     except ValidationError as exc:
         raise UnprocessableError(str(exc)) from exc
 
-    row = await SubmissionService(db).create(payload=payload, photo=photo)
+    row = await SubmissionService(db).create(payload=payload, photos=photos)
     return ApiResponse.success(data=SubmissionOut.model_validate(row))
 
 

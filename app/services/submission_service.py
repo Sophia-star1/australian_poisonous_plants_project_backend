@@ -1,12 +1,11 @@
-"""Submission service — aligned to real Supabase schema.
+"""Submission service.
 
-`POST /submissions/` writes:
-  * one row into `submissions`
-  * one row into `submission_images` (more can be added later when the
-    mobile app uploads multiple photos).
+`POST /submissions/` writes one row into `submissions` and one row
+per uploaded photo into `submission_images` (the first photo is
+marked `is_primary=True`).
 
 `GET /submissions/me` returns the rows whose `contributor_email`
-matches the signed-in user — the real schema has no `user_id` FK, so
+matches the signed-in user — the schema has no `user_id` FK, so
 we identify a user's submissions by email.
 
 Admin endpoints (`GET /submissions/`, `GET /submissions/{id}`,
@@ -31,7 +30,6 @@ class SubmissionService:
     """Create, list, and read plant observation submissions."""
 
     def __init__(self, db: AsyncSession, storage: StorageService | None = None) -> None:
-        """Initialize with a database session and optional storage backend."""
         self.db = db
         self.storage = storage or StorageService()
 
@@ -44,10 +42,9 @@ class SubmissionService:
     async def create(
         self,
         payload: SubmissionCreate,
-        photo: UploadFile,
+        photos: list[UploadFile],
     ) -> Submission:
-        """Persist a new submission + its primary image."""
-        photo_url = await self._store_photo(photo)
+        """Persist a new submission. The first photo is marked primary."""
         sub = Submission(
             contributor_name=payload.contributor_name.strip(),
             contributor_email=str(payload.contributor_email).strip().lower(),
@@ -57,7 +54,11 @@ class SubmissionService:
             longitude=payload.longitude,
             status="pending",
         )
-        sub.images.append(SubmissionImage(image_url=photo_url, is_primary=True))
+
+        for i, photo in enumerate(photos):
+            url = await self._store_photo(photo)
+            sub.images.append(SubmissionImage(image_url=url, is_primary=(i == 0)))
+
         self.db.add(sub)
         await self.db.flush()
         await self.db.refresh(sub, attribute_names=["images"])
