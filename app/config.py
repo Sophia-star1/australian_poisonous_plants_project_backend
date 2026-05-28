@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     AWS_S3_ENDPOINT_URL: str = ""
 
     # --- CORS ---
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
+    ALLOWED_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:8081",
+        "http://localhost:19006",
+    ]
 
     # --- Celery (optional) ---
     CELERY_BROKER_URL: str = ""
