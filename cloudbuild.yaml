@@ -40,7 +40,7 @@ steps:
       - "--cpu"
       - "1"
       - "--set-env-vars"
-      - "APP_NAME=${_SERVICE_NAME},DEBUG=false"
+      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:8081","http://localhost:19006"]'
       - "--set-secrets"
       - "SECRET_KEY=secret-key:latest,DATABASE_URL=database-url:latest"
 
