@@ -8,6 +8,11 @@ from jose import JWTError, jwt
 
 from app.config import settings
 
+#: Value of the `type` claim on short-lived tokens used to call the API.
+ACCESS_TOKEN_TYPE = "access"
+#: Value of the `type` claim on long-lived tokens, only valid at /auth/refresh.
+REFRESH_TOKEN_TYPE = "refresh"
+
 
 def _now() -> datetime:
     """Return an aware UTC `datetime` (separate helper for easier mocking)."""
@@ -29,7 +34,7 @@ def create_access_token(
 ) -> str:
     """Generate a signed JWT access token."""
     delta = timedelta(minutes=expires_delta or settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    return _build_token(data, delta, token_type="access")
+    return _build_token(data, delta, token_type=ACCESS_TOKEN_TYPE)
 
 
 def create_refresh_token(
@@ -37,15 +42,26 @@ def create_refresh_token(
 ) -> str:
     """Generate a signed JWT refresh token."""
     delta = timedelta(days=expires_delta or settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    return _build_token(data, delta, token_type="refresh")
+    return _build_token(data, delta, token_type=REFRESH_TOKEN_TYPE)
 
 
-def verify_token(token: str) -> dict[str, Any] | None:
-    """Decode and validate a JWT token, returning claims or `None`."""
+def verify_token(token: str, expected_type: str = ACCESS_TOKEN_TYPE) -> dict[str, Any] | None:
+    """Decode and validate a JWT, returning its claims or `None`.
+
+    The `type` claim is enforced: an access token cannot be used where a
+    refresh token is expected, and — more importantly — a long-lived refresh
+    token cannot be presented as an access token to reach protected endpoints.
+    """
     try:
-        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        claims: dict[str, Any] = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
     except JWTError:
         return None
+
+    if claims.get("type") != expected_type:
+        return None
+    return claims
 
 
 def get_password_hash(password: str) -> str:

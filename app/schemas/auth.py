@@ -24,6 +24,12 @@ class SignUpRequest(BaseModel):
     full_name: str | None = None
 
 
+class RefreshRequest(BaseModel):
+    """Exchange a refresh token for a fresh token pair."""
+
+    refresh_token: str
+
+
 class TokenResponse(BaseModel):
     """JWT token pair returned after authentication."""
 

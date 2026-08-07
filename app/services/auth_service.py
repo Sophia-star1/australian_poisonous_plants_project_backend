@@ -4,9 +4,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, UnauthorizedError
 from app.core.security import (
+    REFRESH_TOKEN_TYPE,
     create_access_token,
     create_refresh_token,
     verify_password,
+    verify_token,
 )
 from app.models.user import User
 from app.schemas.auth import LoginRequest, SignUpRequest, TokenResponse
@@ -57,6 +59,32 @@ class AuthService:
         user = await self.users.get_by_email(payload.email)
         if user is None or not verify_password(payload.password, user.hashed_password):
             raise UnauthorizedError("Incorrect email or password.")
+        if not user.is_active:
+            raise UnauthorizedError("Account is disabled.")
+        return self._issue_tokens(user)
+
+    async def refresh(self, refresh_token: str) -> TokenResponse:
+        """Exchange a valid refresh token for a brand-new token pair.
+
+        The user is re-read from the database so that a disabled account or a
+        changed role takes effect on refresh rather than persisting for the
+        remaining lifetime of the refresh token.
+        """
+        claims = verify_token(refresh_token, expected_type=REFRESH_TOKEN_TYPE)
+        if claims is None:
+            raise UnauthorizedError("Invalid or expired refresh token.")
+
+        sub = claims.get("sub")
+        if sub is None:
+            raise UnauthorizedError("Invalid token payload.")
+        try:
+            user_id = int(str(sub))
+        except ValueError as exc:
+            raise UnauthorizedError("Invalid token payload.") from exc
+
+        user = await self.users.get_by_id(user_id)
+        if user is None:
+            raise UnauthorizedError("User no longer exists.")
         if not user.is_active:
             raise UnauthorizedError("Account is disabled.")
         return self._issue_tokens(user)

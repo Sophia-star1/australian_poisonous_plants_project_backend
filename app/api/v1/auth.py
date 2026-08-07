@@ -16,6 +16,7 @@ from app.dependencies import get_current_active_user
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
+    RefreshRequest,
     SessionResponse,
     SignUpRequest,
     TokenResponse,
@@ -44,6 +45,20 @@ async def login(
 ) -> ApiResponse[TokenResponse]:
     """Authenticate user and issue access + refresh tokens."""
     tokens = await AuthService(db).authenticate(payload)
+    return ApiResponse.success(data=tokens)
+
+
+@router.post("/refresh", response_model=ApiResponse[TokenResponse])
+async def refresh_tokens(
+    payload: RefreshRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[TokenResponse]:
+    """Exchange a refresh token for a new access + refresh token pair.
+
+    This is the only endpoint that accepts a refresh token; everywhere else
+    the `type` claim is enforced to be `access`.
+    """
+    tokens = await AuthService(db).refresh(payload.refresh_token)
     return ApiResponse.success(data=tokens)
 
 
