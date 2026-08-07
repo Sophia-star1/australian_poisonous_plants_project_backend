@@ -3,6 +3,10 @@
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class AppException(HTTPException):
     """Base application exception with a default error code."""
@@ -54,9 +58,46 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
     )
 
 
+def _format_validation_errors(exc: Exception) -> str:
+    """Render pydantic's error list as one readable sentence.
+
+    FastAPI's default 422 body is a nested `detail` array that does not match
+    the `{code, message, data}` envelope every other response uses.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc)
+    parts = []
+    for err in errors():
+        location = ".".join(str(item) for item in err.get("loc", ()) if item != "body")
+        parts.append(f"{location or 'body'}: {err.get('msg', 'invalid')}")
+    return "; ".join(parts) or str(exc)
+
+
 async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle request validation errors and return structured JSON error."""
     return JSONResponse(
         status_code=422,
-        content={"code": 422, "message": str(exc), "data": None},
+        content={"code": 422, "message": _format_validation_errors(exc), "data": None},
+    )
+
+
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all so an unexpected error still returns the API envelope.
+
+    Without this, anything that is not an `AppException` escapes to Starlette
+    and produces a bare `Internal Server Error` body — inconsistent with every
+    other response and useless to a client. The traceback is logged with the
+    request ID for correlation but never sent to the caller.
+    """
+    logger.exception(
+        "unhandled_exception",
+        request_id=getattr(request.state, "request_id", None),
+        method=request.method,
+        path=request.url.path,
+        exc_type=type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"code": 500, "message": "Internal server error.", "data": None},
     )

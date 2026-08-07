@@ -1,8 +1,36 @@
 """Authentication request and response schemas."""
 
-from pydantic import BaseModel, EmailStr, Field
+from typing import Annotated
 
+from pydantic import AfterValidator, BaseModel, EmailStr, Field
+
+from app.core.security import BCRYPT_MAX_PASSWORD_BYTES
 from app.schemas.user import UserOut
+
+#: Minimum password length. Raised from 6 — six characters is trivially
+#: brute-forceable and the login endpoint has no per-account lockout.
+MIN_PASSWORD_LENGTH = 8
+
+
+def _within_bcrypt_limit(value: str) -> str:
+    """Reject passwords bcrypt cannot hash.
+
+    bcrypt truncates or errors past 72 *bytes*, and a character-count limit
+    is not equivalent: a password of emoji or CJK characters blows the byte
+    budget well before it hits any plausible character cap.
+    """
+    if len(value.encode()) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password must be at most {BCRYPT_MAX_PASSWORD_BYTES} bytes when UTF-8 encoded."
+        )
+    return value
+
+
+Password = Annotated[
+    str,
+    Field(min_length=MIN_PASSWORD_LENGTH),
+    AfterValidator(_within_bcrypt_limit),
+]
 
 
 class LoginRequest(BaseModel):
@@ -20,7 +48,7 @@ class SignUpRequest(BaseModel):
     """
 
     email: EmailStr
-    password: str = Field(..., min_length=6, max_length=128)
+    password: Password
     full_name: str | None = None
 
 

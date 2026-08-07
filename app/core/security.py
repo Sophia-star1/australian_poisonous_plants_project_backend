@@ -64,9 +64,25 @@ def verify_token(token: str, expected_type: str = ACCESS_TOKEN_TYPE) -> dict[str
     return claims
 
 
+#: bcrypt hashes at most 72 bytes of input and raises beyond that. Anything
+#: longer must be rejected at the edge, not at the hashing call.
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
 def get_password_hash(password: str) -> str:
-    """Hash a plaintext password using bcrypt."""
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    """Hash a plaintext password using bcrypt.
+
+    Raises:
+        ValueError: if the password exceeds bcrypt's 72-byte input limit.
+            Callers should validate before reaching this point; the guard is
+            here so the failure is explicit rather than a library traceback.
+    """
+    encoded = password.encode()
+    if len(encoded) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password must be at most {BCRYPT_MAX_PASSWORD_BYTES} bytes when UTF-8 encoded."
+        )
+    return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
