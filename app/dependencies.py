@@ -1,6 +1,6 @@
 """Global FastAPI dependency injection providers."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
@@ -11,6 +11,7 @@ from app.core.security import verify_token
 from app.core.token_denylist import get_denylist
 from app.db.session import get_db
 from app.models.user import User
+from app.schemas.role import UserRole
 from app.services.user_service import UserService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
@@ -96,14 +97,18 @@ async def get_optional_user(
     return user
 
 
-def require_role(role: str) -> Callable[..., User]:
-    """Return a dependency that enforces a specific user role."""
+def require_role(role: UserRole) -> Callable[..., Awaitable[User]]:
+    """Return a dependency that enforces a specific user role.
+
+    Takes a `UserRole` rather than a bare string: the comparison is exact, so
+    a misspelled literal would reject everyone forever without raising.
+    """
 
     async def _role_checker(
         current_user: User = Depends(get_current_active_user),
     ) -> User:
-        if current_user.role != role:
-            raise ForbiddenError(f"Role '{role}' required.")
+        if current_user.role != role.value:
+            raise ForbiddenError(f"Role '{role.value}' required.")
         return current_user
 
     return _role_checker

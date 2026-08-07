@@ -2,11 +2,12 @@
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_password_hash
 from app.models.user import User
+from app.schemas.role import UserRole
 from app.schemas.user import UserCreate, UserUpdate
 
 
@@ -30,20 +31,52 @@ class UserService:
         return result.scalars().first()
 
     async def list_users(
-        self, page: int = 1, page_size: int = 20
+        self, page: int = 1, page_size: int = 20, role: UserRole | None = None
     ) -> tuple[Sequence[User], int]:
         """Return a paginated list of users and the total count."""
         page = max(page, 1)
         page_size = max(min(page_size, 100), 1)
         offset = (page - 1) * page_size
 
-        total_stmt = select(User)
-        total_result = await self.db.execute(total_stmt)
-        total = len(total_result.scalars().all())
+        filters = [User.role == role.value] if role is not None else []
 
-        stmt = select(User).order_by(User.id.asc()).offset(offset).limit(page_size)
+        # count(*) rather than loading every row to measure its length: the
+        # previous implementation pulled the whole table into memory on every
+        # page request just to produce a total.
+        total_stmt = select(func.count()).select_from(User).where(*filters)
+        total = int((await self.db.execute(total_stmt)).scalar_one())
+
+        stmt = (
+            select(User)
+            .where(*filters)
+            .order_by(User.id.asc())
+            .offset(offset)
+            .limit(page_size)
+        )
         result = await self.db.execute(stmt)
         return result.scalars().all(), total
+
+    async def set_role(self, user_id: int, role: UserRole) -> User | None:
+        """Change a user's role. Returns None when the user does not exist."""
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return None
+        user.role = role.value
+        await self.db.flush()
+        await self.db.refresh(user)
+        return user
+
+    async def count_with_role(self, role: UserRole) -> int:
+        """Count active accounts holding `role`.
+
+        Used to refuse the change that would remove the last administrator.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(User)
+            .where(User.role == role.value, User.is_active.is_(True))
+        )
+        return int((await self.db.execute(stmt)).scalar_one())
 
     async def create(self, payload: UserCreate) -> User:
         """Create a new user record. Caller must check for duplicate emails."""
