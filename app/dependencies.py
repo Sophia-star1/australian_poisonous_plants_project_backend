@@ -57,7 +57,10 @@ async def get_optional_user(
     """Return the current user if a valid token was supplied, otherwise `None`.
 
     Used by endpoints (e.g. `POST /submissions`) that the mobile app may
-    invoke either signed in or anonymously.
+    invoke either signed in or anonymously. A disabled account is treated as
+    anonymous rather than authenticated, matching `get_current_active_user`;
+    the alternative would let a deactivated user keep attributing records to
+    themselves.
     """
     if not token:
         return None
@@ -71,7 +74,11 @@ async def get_optional_user(
         user_id = int(str(sub))
     except ValueError:
         return None
-    return await UserService(db).get_by_id(user_id)
+
+    user = await UserService(db).get_by_id(user_id)
+    if user is None or not user.is_active:
+        return None
+    return user
 
 
 def require_role(role: str) -> Callable[..., User]:

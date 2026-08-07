@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, UnprocessableError
 from app.db.session import get_db
-from app.dependencies import get_current_active_user, require_role
+from app.dependencies import get_current_active_user, get_optional_user, require_role
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
 from app.schemas.submission import (
@@ -40,14 +40,26 @@ async def create_submission(
     latitude: float | None = Form(None),
     longitude: float | None = Form(None),
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ) -> ApiResponse[SubmissionOut]:
     """Create a new observation from the mobile Upload tab.
 
     Upload one or more photos under the same `photos` field name.
     The first photo in the list is marked as the primary image.
+
+    Anonymous submissions are still accepted, but when a bearer token is
+    present the contributor identity is taken from it and the corresponding
+    form fields are ignored. `GET /submissions/me` matches on
+    `contributor_email`, so a client-supplied address was not merely a data
+    quality problem: submitting under someone else's email placed the record
+    in that person's list.
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
+
+    if current_user is not None:
+        contributor_email = current_user.email
+        contributor_name = current_user.full_name or current_user.email.split("@")[0]
 
     try:
         payload = SubmissionCreate(
