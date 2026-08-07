@@ -44,7 +44,14 @@ class AuthService:
         """
         existing = await self.users.get_by_email(payload.email)
         if existing is not None:
-            raise ConflictError("This email is already registered.")
+            # Deliberately generic: "This email is already registered" let
+            # anyone probe the API to learn which addresses hold an account.
+            # The detail belongs in the email we would send to the address
+            # itself, not in a response to whoever asked.
+            raise ConflictError(
+                "Could not create the account. If you already have one, try signing in "
+                "or resetting your password."
+            )
 
         user = await self.users.create(
             UserCreate(
