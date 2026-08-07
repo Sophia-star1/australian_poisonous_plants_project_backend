@@ -10,6 +10,7 @@ from app.core.security import (
     verify_password,
     verify_token,
 )
+from app.core.token_denylist import get_denylist
 from app.models.user import User
 from app.schemas.auth import LoginRequest, SignUpRequest, TokenResponse
 from app.schemas.user import UserCreate, UserOut
@@ -72,6 +73,10 @@ class AuthService:
         """
         claims = verify_token(refresh_token, expected_type=REFRESH_TOKEN_TYPE)
         if claims is None:
+            raise UnauthorizedError("Invalid or expired refresh token.")
+
+        jti = claims.get("jti")
+        if isinstance(jti, str) and await get_denylist().is_revoked(jti):
             raise UnauthorizedError("Invalid or expired refresh token.")
 
         sub = claims.get("sub")

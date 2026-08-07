@@ -16,11 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.exceptions import TooManyRequestsError
 from app.core.rate_limit import get_rate_limiter
+from app.core.security import ACCESS_TOKEN_TYPE, REFRESH_TOKEN_TYPE, verify_token
+from app.core.token_denylist import get_denylist, seconds_until
 from app.db.session import get_db
-from app.dependencies import get_current_active_user
+from app.dependencies import get_current_active_user, oauth2_scheme
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
+    LogoutRequest,
     RefreshRequest,
     SessionResponse,
     SignUpRequest,
@@ -118,12 +121,35 @@ async def refresh_tokens(
 
 
 @router.post("/logout", response_model=ApiResponse[None])
-async def logout() -> ApiResponse[None]:
-    """Sign out the current session.
+async def logout(
+    payload: LogoutRequest | None = None,
+    token: str | None = Depends(oauth2_scheme),
+) -> ApiResponse[None]:
+    """Sign out: revoke the presented access token and, if given, the refresh token.
 
-    Token revocation will require a denylist; for now clients should
-    simply discard their copy of the token.
+    Clients should send the refresh token in the body as well. Revoking only
+    the access token would leave the refresh token able to mint a new one,
+    which is the same as not logging out at all.
+
+    Always reports success — an expired or malformed token is already
+    unusable, and reporting otherwise would tell a caller which tokens are
+    valid.
     """
+    denylist = get_denylist()
+
+    for candidate, expected_type in (
+        (token, ACCESS_TOKEN_TYPE),
+        (payload.refresh_token if payload else None, REFRESH_TOKEN_TYPE),
+    ):
+        if not candidate:
+            continue
+        claims = verify_token(candidate, expected_type=expected_type)
+        if claims is None:
+            continue
+        jti = claims.get("jti")
+        if isinstance(jti, str):
+            await denylist.revoke(jti, seconds_until(claims.get("exp")))
+
     return ApiResponse.success(message="Signed out.")
 
 

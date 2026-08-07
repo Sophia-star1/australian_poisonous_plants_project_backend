@@ -58,6 +58,17 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    """Optional body for logout, carrying the refresh token to revoke.
+
+    The access token comes from the Authorization header; the refresh token
+    has to be sent explicitly or it would survive the logout and could mint a
+    replacement access token.
+    """
+
+    refresh_token: str | None = None
+
+
 class TokenResponse(BaseModel):
     """JWT token pair returned after authentication."""
 

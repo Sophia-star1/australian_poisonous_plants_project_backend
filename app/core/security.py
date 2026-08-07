@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import bcrypt
 from jose import JWTError, jwt
@@ -22,10 +23,16 @@ def _now() -> datetime:
 def _build_token(
     data: dict[str, Any], expires_delta: timedelta, token_type: str
 ) -> str:
-    """Encode the given claims into a signed JWT."""
+    """Encode the given claims into a signed JWT.
+
+    Every token gets a unique `jti` so it can be revoked individually; see
+    `core.token_denylist`. Without it, logout has nothing to key on.
+    """
     to_encode: dict[str, Any] = {**data}
     expire = _now() + expires_delta
-    to_encode.update({"exp": expire, "iat": _now(), "type": token_type})
+    to_encode.update(
+        {"exp": expire, "iat": _now(), "type": token_type, "jti": str(uuid4())}
+    )
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
