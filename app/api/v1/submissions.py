@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, UnprocessableError
 from app.db.session import get_db
-from app.dependencies import get_current_active_user, get_optional_user, require_role
+from app.dependencies import get_current_active_user, get_optional_user, require_admin
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
 from app.schemas.role import UserRole
@@ -110,7 +110,7 @@ async def list_all_submissions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_role(UserRole.ADMIN)),
+    _admin: User = Depends(require_admin),
 ) -> ApiResponse[PageResult[SubmissionOut]]:
     """Admin: list all submissions with optional filters."""
     filters = SubmissionFilter(
@@ -135,7 +135,7 @@ async def list_all_submissions(
 async def get_submission(
     submission_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_role(UserRole.ADMIN)),
+    _admin: User = Depends(require_admin),
 ) -> ApiResponse[SubmissionOut]:
     """Admin: get a single submission's full detail."""
     row = await SubmissionService(db).get_by_id(submission_id)
@@ -149,7 +149,7 @@ async def update_submission_status(
     submission_id: UUID,
     payload: SubmissionUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role(UserRole.ADMIN)),
+    admin: User = Depends(require_admin),
 ) -> ApiResponse[SubmissionOut]:
     """Admin: approve or reject a submission."""
     svc = SubmissionService(db)

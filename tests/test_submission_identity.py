@@ -5,7 +5,7 @@
 could place a record into another person's list by typing their address.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -39,7 +39,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         id = uuid4()
         contributor_name = ""
         contributor_email = ""
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         status = "pending"
         user_description = None
         location_state = None

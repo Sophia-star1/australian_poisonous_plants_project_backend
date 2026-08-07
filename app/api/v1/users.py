@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ForbiddenError, NotFoundError
 from app.db.session import get_db
-from app.dependencies import require_role
+from app.dependencies import require_admin
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
 from app.schemas.role import UserRole
@@ -30,7 +30,7 @@ async def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_role(UserRole.ADMIN)),
+    _admin: User = Depends(require_admin),
 ) -> ApiResponse[PageResult[UserOut]]:
     """Admin: list accounts and their roles."""
     rows, total = await UserService(db).list_users(page=page, page_size=page_size, role=role)
@@ -48,7 +48,7 @@ async def list_users(
 async def get_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_role(UserRole.ADMIN)),
+    _admin: User = Depends(require_admin),
 ) -> ApiResponse[UserOut]:
     """Admin: fetch a single account."""
     user = await UserService(db).get_by_id(user_id)
@@ -62,7 +62,7 @@ async def update_user_role(
     user_id: int,
     payload: UserRoleUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role(UserRole.ADMIN)),
+    admin: User = Depends(require_admin),
 ) -> ApiResponse[UserOut]:
     """Admin: promote or demote an account.
 

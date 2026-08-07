@@ -52,6 +52,22 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# B008 warns about function calls in argument defaults, which is precisely how
+# FastAPI declares dependencies and parameter metadata. Not a mutable-default
+# hazard here: these markers are evaluated once and never mutated.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.mypy]
 strict = true
 python_version = "3.12"

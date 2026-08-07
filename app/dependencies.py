@@ -112,3 +112,8 @@ def require_role(role: UserRole) -> Callable[..., Awaitable[User]]:
         return current_user
 
     return _role_checker
+
+
+#: Built once at import so routes can write `Depends(require_admin)` instead of
+#: calling the factory inside an argument default on every endpoint.
+require_admin = require_role(UserRole.ADMIN)
