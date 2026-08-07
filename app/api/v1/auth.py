@@ -8,9 +8,14 @@ Replaces the mobile app's direct `supabase.auth.*` calls:
 * `getSession`         → `GET  /auth/session`
 """
 
-from fastapi import APIRouter, Depends
+import hashlib
+
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
+from app.core.exceptions import TooManyRequestsError
+from app.core.rate_limit import get_rate_limiter
 from app.db.session import get_db
 from app.dependencies import get_current_active_user
 from app.models.user import User
@@ -28,23 +33,73 @@ from app.services.auth_service import AuthService
 router = APIRouter()
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP.
+
+    Cloud Run terminates TLS at its front end, so `request.client.host` is the
+    load balancer. The first entry of X-Forwarded-For is the original caller.
+    It is spoofable in general, which is why the account-scoped limit below
+    exists alongside the IP-scoped one — an attacker can rotate one or the
+    other, but not both at once.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _account_key(email: str) -> str:
+    """Hash the email so credential material never lands in Redis or logs."""
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:32]
+
+
+async def _enforce_rate_limit(scope: str, identifiers: list[str], limit: int) -> None:
+    """Raise 429 if any identifier has exhausted its budget for this window."""
+    if not settings.RATE_LIMIT_ENABLED:
+        return
+    limiter = get_rate_limiter()
+    for identifier in identifiers:
+        result = await limiter.hit(
+            f"rl:{scope}:{identifier}", limit, settings.RATE_LIMIT_WINDOW_SECONDS
+        )
+        if not result.allowed:
+            raise TooManyRequestsError(
+                "Too many attempts. Please wait before trying again.",
+                retry_after=result.retry_after,
+            )
+
+
 @router.post("/signup", response_model=ApiResponse[TokenResponse], status_code=201)
 async def sign_up(
+    request: Request,
     payload: SignUpRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[TokenResponse]:
     """Register a new account (mobile `CreateAccountScreen`)."""
+    await _enforce_rate_limit(
+        "signup", [f"ip:{_client_ip(request)}"], settings.SIGNUP_RATE_LIMIT
+    )
     tokens = await AuthService(db).sign_up(payload)
     return ApiResponse.success(data=tokens, message="Account created.")
 
 
 @router.post("/login", response_model=ApiResponse[TokenResponse])
 async def login(
+    request: Request,
     payload: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[TokenResponse]:
     """Authenticate user and issue access + refresh tokens."""
+    ip_key = f"ip:{_client_ip(request)}"
+    account_key = f"acct:{_account_key(payload.email)}"
+    await _enforce_rate_limit("login", [ip_key, account_key], settings.LOGIN_RATE_LIMIT)
+
     tokens = await AuthService(db).authenticate(payload)
+
+    # Successful sign-in clears the account counter so a user who mistyped a
+    # few times then got it right is not left throttled.
+    if settings.RATE_LIMIT_ENABLED:
+        await get_rate_limiter().reset(f"rl:login:{account_key}")
     return ApiResponse.success(data=tokens)
 
 

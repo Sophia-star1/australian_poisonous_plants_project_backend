@@ -50,11 +50,26 @@ class UnprocessableError(AppException):
         super().__init__(status_code=422, detail=detail)
 
 
+class TooManyRequestsError(AppException):
+    """Rate limit exceeded (429)."""
+
+    def __init__(
+        self, detail: str = "Too many requests. Try again later.", retry_after: int = 60
+    ) -> None:
+        super().__init__(status_code=429, detail=detail)
+        self.retry_after = retry_after
+
+
 async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     """Handle AppException subclasses and return structured JSON error."""
+    headers: dict[str, str] = {}
+    retry_after = getattr(exc, "retry_after", None)
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.status_code, "message": exc.detail, "data": None},
+        headers=headers or None,
     )
 
 
