@@ -14,16 +14,17 @@ Admin endpoints (`GET /submissions/`, `GET /submissions/{id}`,
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import UploadFile
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import SubmissionCreate, SubmissionFilter, SubmissionUpdate
-from app.services.storage_service import StorageService
+from app.services.storage_service import StorageService, build_object_key
 
 
 class SubmissionService:
@@ -33,10 +34,17 @@ class SubmissionService:
         self.db = db
         self.storage = storage or StorageService()
 
-    async def _store_photo(self, photo: UploadFile) -> str:
-        """Upload the photo and return its URL."""
-        key = f"submissions/{photo.filename or 'upload.bin'}"
-        stored = await self.storage.upload_file(photo, key)
+    async def _store_photo(self, photo: UploadFile, submission_id: UUID) -> str:
+        """Upload one photo and return the URL to record against the row.
+
+        Photos are foldered by submission id, which keeps a submission's files
+        together for review and makes cleanup a prefix delete. The filename
+        itself never becomes part of the key — see `build_object_key`.
+        """
+        key = build_object_key(f"submissions/{submission_id}", photo.filename)
+        stored = await self.storage.upload_file(
+            photo, key, bucket=settings.SUPABASE_SUBMISSION_BUCKET
+        )
         return stored.url or stored.key
 
     async def create(
@@ -44,8 +52,17 @@ class SubmissionService:
         payload: SubmissionCreate,
         photos: list[UploadFile],
     ) -> Submission:
-        """Persist a new submission. The first photo is marked primary."""
+        """Persist a new submission. The first photo is marked primary.
+
+        The id is generated up front rather than left to the column default so
+        the photos can be stored under it before the row is flushed. Uploads
+        happen first on purpose: if storage fails the request aborts and the
+        transaction rolls back, so a submission never exists with photos that
+        do not.
+        """
+        submission_id = uuid4()
         sub = Submission(
+            id=submission_id,
             contributor_name=payload.contributor_name.strip(),
             contributor_email=str(payload.contributor_email).strip().lower(),
             user_description=payload.user_description or None,
@@ -56,7 +73,7 @@ class SubmissionService:
         )
 
         for i, photo in enumerate(photos):
-            url = await self._store_photo(photo)
+            url = await self._store_photo(photo, submission_id)
             sub.images.append(SubmissionImage(image_url=url, is_primary=(i == 0)))
 
         self.db.add(sub)

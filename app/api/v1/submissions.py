@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.exceptions import NotFoundError, UnprocessableError
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, require_role
@@ -25,9 +26,37 @@ from app.schemas.submission import (
     SubmissionStatus,
     SubmissionUpdate,
 )
+from app.services.storage_service import StorageError
 from app.services.submission_service import SubmissionService
 
 router = APIRouter()
+
+#: Cap on photos accepted in a single submission.
+MAX_PHOTOS_PER_SUBMISSION = 10
+
+
+def _validate_photos(photos: list[UploadFile]) -> None:
+    """Reject anything that is not a plausible plant photo.
+
+    Checked before a single byte is uploaded, so a bad request costs nothing
+    in storage. The declared content type is not trustworthy on its own — it
+    is client-supplied — but rejecting on it stops the honest mistakes, and
+    the storage key never carries an executable extension either way.
+    """
+    if not photos:
+        raise UnprocessableError("At least one photo is required.")
+    if len(photos) > MAX_PHOTOS_PER_SUBMISSION:
+        raise UnprocessableError(
+            f"A submission may include at most {MAX_PHOTOS_PER_SUBMISSION} photos."
+        )
+    for photo in photos:
+        content_type = (photo.content_type or "").split(";")[0].strip().lower()
+        if content_type not in settings.ALLOWED_IMAGE_TYPES:
+            allowed = ", ".join(settings.ALLOWED_IMAGE_TYPES)
+            raise UnprocessableError(
+                f"{photo.filename or 'file'}: unsupported type "
+                f"'{content_type or 'unknown'}'. Allowed: {allowed}."
+            )
 
 
 @router.post("/", response_model=ApiResponse[SubmissionOut], status_code=201)
@@ -45,9 +74,12 @@ async def create_submission(
 
     Upload one or more photos under the same `photos` field name.
     The first photo in the list is marked as the primary image.
+
+    Photos are stored in the `submission-images` bucket and stay there as an
+    audit trail; they are copied into `plant-images` only if a reviewer
+    approves the submission.
     """
-    if not photos:
-        raise UnprocessableError("At least one photo is required.")
+    _validate_photos(photos)
 
     try:
         payload = SubmissionCreate(
@@ -61,7 +93,12 @@ async def create_submission(
     except ValidationError as exc:
         raise UnprocessableError(str(exc)) from exc
 
-    row = await SubmissionService(db).create(payload=payload, photos=photos)
+    try:
+        row = await SubmissionService(db).create(payload=payload, photos=photos)
+    except StorageError as exc:
+        # Surface the storage failure instead of writing a submission whose
+        # photos do not exist. The session rolls back with the request.
+        raise UnprocessableError(str(exc)) from exc
     return ApiResponse.success(data=SubmissionOut.model_validate(row))
 
 
