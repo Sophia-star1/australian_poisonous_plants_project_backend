@@ -28,6 +28,20 @@ class Settings(BaseSettings):
     AWS_S3_BUCKET: str = ""
     AWS_S3_ENDPOINT_URL: str = ""
 
+    # --- Supabase Storage ---
+    #: Project URL, e.g. https://<ref>.supabase.co
+    SUPABASE_URL: str = ""
+    #: Service-role key. Server-side only — it bypasses row level security,
+    #: so it must never reach the mobile client or a browser bundle.
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    #: Where contributor photos land while a submission awaits review.
+    SUPABASE_SUBMISSION_BUCKET: str = "submission-images"
+    #: Where approved photos are promoted to, alongside the curated library.
+    SUPABASE_PLANT_BUCKET: str = "plant-images"
+    #: Rejected uploads, per policy: keep the originals as an audit trail.
+    MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
+    ALLOWED_IMAGE_TYPES: list[str] = ["image/jpeg", "image/png", "image/webp"]
+
     # --- CORS ---
     ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",
@@ -47,6 +61,11 @@ class Settings(BaseSettings):
     def storage_enabled(self) -> bool:
         """Check whether object storage is configured."""
         return bool(self.AWS_ACCESS_KEY_ID and self.AWS_S3_BUCKET)
+
+    @property
+    def supabase_storage_enabled(self) -> bool:
+        """Check whether Supabase Storage credentials are present."""
+        return bool(self.SUPABASE_URL and self.SUPABASE_SERVICE_ROLE_KEY)
 
     @property
     def celery_enabled(self) -> bool:
