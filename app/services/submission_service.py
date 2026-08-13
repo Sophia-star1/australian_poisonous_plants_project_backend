@@ -17,14 +17,29 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
+from app.models.plant import Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
-from app.schemas.submission import SubmissionCreate, SubmissionFilter, SubmissionUpdate
+from app.schemas.submission import (
+    PENDING_STATUS,
+    PlantIdentification,
+    SubmissionCreate,
+    SubmissionFilter,
+    SubmissionUpdate,
+)
 from app.services.storage_service import StorageService, build_object_key
+
+
+class AlreadyReviewedError(RuntimeError):
+    """Raised when a submission was reviewed by someone else first."""
+
+    def __init__(self, current_status: str) -> None:
+        super().__init__(f"Submission has already been {current_status}.")
+        self.current_status = current_status
 
 
 class SubmissionService:
@@ -145,17 +160,91 @@ class SubmissionService:
         result = await self.db.execute(stmt)
         return result.scalars().all(), int(total or 0)
 
+    async def _promote_photos(self, submission: Submission, plant_id: int) -> list[PlantImage]:
+        """Copy a submission's photos into the curated plant library.
+
+        Server-side copies, so the bytes never pass through this process. The
+        originals stay in `submission-images` as the record of what the
+        reviewer saw — the approval refers to those exact files.
+        """
+        promoted: list[PlantImage] = []
+        for image in sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id))):
+            source_key = self.storage.key_from_url(image.image_url)
+            destination_key = build_object_key(f"plants/{plant_id}", source_key)
+            stored = await self.storage.copy_object(
+                source_key=source_key,
+                destination_key=destination_key,
+                source_bucket=settings.SUPABASE_SUBMISSION_BUCKET,
+                destination_bucket=settings.SUPABASE_PLANT_BUCKET,
+            )
+            promoted.append(
+                PlantImage(
+                    plant_id=plant_id,
+                    image_url=stored.url or stored.key,
+                    caption=submission.user_description,
+                    is_primary=image.is_primary,
+                )
+            )
+        return promoted
+
+    async def _create_plant(
+        self, identification: PlantIdentification, submission: Submission
+    ) -> Plant:
+        """Create the `plants` row a reviewer approved into existence.
+
+        The observed location is folded into `distribution_observed` when the
+        reviewer did not supply one: it is the single piece of botanical
+        information a submission genuinely carries.
+        """
+        fields = identification.model_dump(exclude_unset=True)
+        if not fields.get("distribution_observed") and submission.location_state:
+            fields["distribution_observed"] = [submission.location_state]
+
+        plant = Plant(**fields)
+        self.db.add(plant)
+        await self.db.flush()
+        return plant
+
     async def update_status(
         self, submission_id: UUID, payload: SubmissionUpdate, reviewed_by: str
-    ) -> Submission | None:
-        """Approve or reject a submission (admin only)."""
+    ) -> tuple[Submission, Plant | None] | None:
+        """Approve or reject a submission (admin only).
+
+        Approving is a single transaction across three things: the submission
+        is marked reviewed, a `plants` row is created from the reviewer's
+        identification, and the photos are copied into `plant-images`. If the
+        copy fails the whole request fails and nothing is committed, so an
+        approved plant never ends up without its photographs.
+
+        The status transition is a guarded UPDATE rather than a read-modify-
+        write, so two reviewers acting at once cannot both succeed.
+        """
         submission = await self.get_by_id(submission_id)
         if submission is None:
             return None
-        submission.status = payload.status
-        submission.reviewer_notes = payload.reviewer_notes
-        submission.reviewed_by = reviewed_by
-        submission.reviewed_at = datetime.now(timezone.utc)
+
+        guard = await self.db.execute(
+            update(Submission)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .values(
+                status=payload.status,
+                reviewer_notes=payload.reviewer_notes,
+                reviewed_by=reviewed_by,
+                reviewed_at=datetime.now(timezone.utc),
+            )
+            .returning(Submission.id)
+        )
+        if guard.first() is None:
+            raise AlreadyReviewedError(submission.status)
+
+        plant: Plant | None = None
+        if payload.status == "approved" and payload.plant is not None:
+            plant = await self._create_plant(payload.plant, submission)
+            for image in await self._promote_photos(submission, plant.id):
+                self.db.add(image)
+            await self.db.flush()
+
         await self.db.flush()
-        await self.db.refresh(submission, attribute_names=["images"])
-        return submission
+        self.db.expire_all()
+        refreshed = await self.get_by_id(submission_id)
+        return (refreshed or submission), plant
