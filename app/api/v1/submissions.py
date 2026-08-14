@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.exceptions import (
     ConflictError,
     ForbiddenError,
@@ -33,6 +34,7 @@ from app.core.exceptions import (
 )
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
+from app.models.plant import Plant
 from app.models.submission import Submission
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
@@ -44,12 +46,66 @@ from app.schemas.submission import (
     SubmissionCreate,
     SubmissionFilter,
     SubmissionOut,
+    SubmissionReviewResult,
     SubmissionStatus,
     SubmissionUpdate,
 )
-from app.services.submission_service import SubmissionService
+from app.services.storage_service import StorageError
+from app.services.submission_service import AlreadyReviewedError, SubmissionService
 
 router = APIRouter()
+
+#: Cap on photos accepted in a single submission.
+MAX_PHOTOS_PER_SUBMISSION = 10
+
+
+def _identification_warnings(plant: Plant | None) -> list[str]:
+    """Flag a published entry that cannot answer the question users ask.
+
+    Not an error — a reviewer may legitimately publish an identification and
+    fill in the toxicology later. But this database is consulted during
+    triage, and an entry that says nothing about toxicity reads as "not
+    dangerous" to someone in a hurry. Saying so in the response is cheaper
+    than discovering it in a clinical setting.
+    """
+    if plant is None:
+        return []
+
+    warnings: list[str] = []
+    if plant.toxic_to_humans is None and not plant.toxic_to_animals:
+        warnings.append(
+            "No toxicity recorded: the entry does not state whether the plant is "
+            "harmful to humans or animals."
+        )
+    if not plant.health_effects:
+        warnings.append("No health effects recorded: symptom search will not find this plant.")
+    if not plant.toxic_parts:
+        warnings.append("No toxic parts recorded.")
+    return warnings
+
+
+def _validate_photos(photos: list[UploadFile]) -> None:
+    """Reject anything that is not a plausible plant photo.
+
+    Checked before a single byte is uploaded, so a bad request costs nothing
+    in storage. The declared content type is not trustworthy on its own — it
+    is client-supplied — but rejecting on it stops the honest mistakes, and
+    the storage key never carries an executable extension either way.
+    """
+    if not photos:
+        raise UnprocessableError("At least one photo is required.")
+    if len(photos) > MAX_PHOTOS_PER_SUBMISSION:
+        raise UnprocessableError(
+            f"A submission may include at most {MAX_PHOTOS_PER_SUBMISSION} photos."
+        )
+    for photo in photos:
+        content_type = (photo.content_type or "").split(";")[0].strip().lower()
+        if content_type not in settings.ALLOWED_IMAGE_TYPES:
+            allowed = ", ".join(settings.ALLOWED_IMAGE_TYPES)
+            raise UnprocessableError(
+                f"{photo.filename or 'file'}: unsupported type "
+                f"'{content_type or 'unknown'}'. Allowed: {allowed}."
+            )
 
 
 def _is_owner(submission: Submission, user: User) -> bool:
@@ -108,9 +164,12 @@ async def create_submission(
     `contributor_email`, so a client-supplied address was not merely a data
     quality problem: submitting under someone else's email placed the record
     in that person's list.
+
+    Photos are stored in the `submission-images` bucket and stay there as an
+    audit trail; they are copied into `plant-images` only if a reviewer
+    approves the submission.
     """
-    if not photos:
-        raise UnprocessableError("At least one photo is required.")
+    _validate_photos(photos)
 
     if current_user is not None:
         contributor_email = current_user.email
@@ -128,7 +187,12 @@ async def create_submission(
     except ValidationError as exc:
         raise UnprocessableError(str(exc)) from exc
 
-    row = await SubmissionService(db).create(payload=payload, photos=photos)
+    try:
+        row = await SubmissionService(db).create(payload=payload, photos=photos)
+    except StorageError as exc:
+        # Surface the storage failure instead of writing a submission whose
+        # photos do not exist. The session rolls back with the request.
+        raise UnprocessableError(str(exc)) from exc
     return ApiResponse.success(data=SubmissionOut.model_validate(row))
 
 
@@ -289,18 +353,45 @@ async def list_all_submissions(
     )
 
 
-@router.patch("/{submission_id}", response_model=ApiResponse[SubmissionOut])
+@router.patch("/{submission_id}", response_model=ApiResponse[SubmissionReviewResult])
 async def update_submission_status(
     submission_id: UUID,
     payload: SubmissionUpdate,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
-) -> ApiResponse[SubmissionOut]:
-    """Admin: approve or reject a submission."""
+) -> ApiResponse[SubmissionReviewResult]:
+    """Admin: approve or reject a submission.
+
+    Approving publishes the observation: it creates a `plants` row from the
+    reviewer's identification and copies the photos into `plant-images`. The
+    originals stay in `submission-images` as the record of what was reviewed.
+
+    All three steps share one transaction. A storage failure while copying
+    aborts the approval rather than leaving a published plant with no
+    photographs.
+    """
     svc = SubmissionService(db)
-    row = await svc.update_status(
-        submission_id, payload=payload, reviewed_by=str(admin.email)
-    )
-    if row is None:
+    try:
+        result = await svc.update_status(
+            submission_id, payload=payload, reviewed_by=str(admin.email)
+        )
+    except AlreadyReviewedError as exc:
+        raise ConflictError(str(exc)) from exc
+    except StorageError as exc:
+        raise UnprocessableError(
+            f"Could not copy the photos into the plant library: {exc}"
+        ) from exc
+
+    if result is None:
         raise NotFoundError(f"Submission {submission_id} not found.")
-    return ApiResponse.success(data=SubmissionOut.model_validate(row))
+
+    submission, plant = result
+    warnings = _identification_warnings(plant)
+    return ApiResponse.success(
+        data=SubmissionReviewResult(
+            submission=SubmissionOut.model_validate(submission),
+            plant_id=plant.id if plant else None,
+            warnings=warnings,
+        ),
+        message="Submission reviewed.",
+    )

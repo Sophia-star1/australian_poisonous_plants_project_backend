@@ -14,22 +14,33 @@ Admin endpoints (`GET /submissions/`, `GET /submissions/{id}`,
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import UploadFile
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
+from app.models.plant import Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import (
     PENDING_STATUS,
+    PlantIdentification,
     SubmissionContentUpdate,
     SubmissionCreate,
     SubmissionFilter,
     SubmissionUpdate,
 )
-from app.services.storage_service import StorageService
+from app.services.storage_service import StorageService, build_object_key
+
+
+class AlreadyReviewedError(RuntimeError):
+    """Raised when a submission was reviewed by someone else first."""
+
+    def __init__(self, current_status: str) -> None:
+        super().__init__(f"Submission has already been {current_status}.")
+        self.current_status = current_status
 
 
 class SubmissionService:
@@ -39,10 +50,17 @@ class SubmissionService:
         self.db = db
         self.storage = storage or StorageService()
 
-    async def _store_photo(self, photo: UploadFile) -> str:
-        """Upload the photo and return its URL."""
-        key = f"submissions/{photo.filename or 'upload.bin'}"
-        stored = await self.storage.upload_file(photo, key)
+    async def _store_photo(self, photo: UploadFile, submission_id: UUID) -> str:
+        """Upload one photo and return the URL to record against the row.
+
+        Photos are foldered by submission id, which keeps a submission's files
+        together for review and makes cleanup a prefix delete. The filename
+        itself never becomes part of the key — see `build_object_key`.
+        """
+        key = build_object_key(f"submissions/{submission_id}", photo.filename)
+        stored = await self.storage.upload_file(
+            photo, key, bucket=settings.SUPABASE_SUBMISSION_BUCKET
+        )
         return stored.url or stored.key
 
     async def create(
@@ -50,8 +68,17 @@ class SubmissionService:
         payload: SubmissionCreate,
         photos: list[UploadFile],
     ) -> Submission:
-        """Persist a new submission. The first photo is marked primary."""
+        """Persist a new submission. The first photo is marked primary.
+
+        The id is generated up front rather than left to the column default so
+        the photos can be stored under it before the row is flushed. Uploads
+        happen first on purpose: if storage fails the request aborts and the
+        transaction rolls back, so a submission never exists with photos that
+        do not.
+        """
+        submission_id = uuid4()
         sub = Submission(
+            id=submission_id,
             contributor_name=payload.contributor_name.strip(),
             contributor_email=str(payload.contributor_email).strip().lower(),
             user_description=payload.user_description or None,
@@ -62,7 +89,7 @@ class SubmissionService:
         )
 
         for i, photo in enumerate(photos):
-            url = await self._store_photo(photo)
+            url = await self._store_photo(photo, submission_id)
             sub.images.append(SubmissionImage(image_url=url, is_primary=(i == 0)))
 
         self.db.add(sub)
@@ -134,6 +161,50 @@ class SubmissionService:
         result = await self.db.execute(stmt)
         return result.scalars().all(), int(total or 0)
 
+    async def _promote_photos(self, submission: Submission, plant_id: int) -> list[PlantImage]:
+        """Copy a submission's photos into the curated plant library.
+
+        Server-side copies, so the bytes never pass through this process. The
+        originals stay in `submission-images` as the record of what the
+        reviewer saw — the approval refers to those exact files.
+        """
+        promoted: list[PlantImage] = []
+        for image in sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id))):
+            source_key = self.storage.key_from_url(image.image_url)
+            destination_key = build_object_key(f"plants/{plant_id}", source_key)
+            stored = await self.storage.copy_object(
+                source_key=source_key,
+                destination_key=destination_key,
+                source_bucket=settings.SUPABASE_SUBMISSION_BUCKET,
+                destination_bucket=settings.SUPABASE_PLANT_BUCKET,
+            )
+            promoted.append(
+                PlantImage(
+                    plant_id=plant_id,
+                    image_url=stored.url or stored.key,
+                    caption=submission.user_description,
+                    is_primary=image.is_primary,
+                )
+            )
+        return promoted
+
+    async def _create_plant(
+        self, identification: PlantIdentification, submission: Submission
+    ) -> Plant:
+        """Create the `plants` row a reviewer approved into existence.
+
+        The observed location is folded into `distribution_observed` when the
+        reviewer did not supply one: it is the single piece of botanical
+        information a submission genuinely carries.
+        """
+        fields = identification.model_dump(exclude_unset=True)
+        if not fields.get("distribution_observed") and submission.location_state:
+            fields["distribution_observed"] = [submission.location_state]
+
+        plant = Plant(**fields)
+        self.db.add(plant)
+        await self.db.flush()
+        return plant
     async def update_content(
         self, submission_id: UUID, payload: SubmissionContentUpdate
     ) -> Submission | None:
@@ -194,7 +265,7 @@ class SubmissionService:
         has_primary = bool(existing)
 
         for photo in photos:
-            url = await self._store_photo(photo)
+            url = await self._store_photo(photo, submission_id)
             self.db.add(
                 SubmissionImage(
                     submission_id=submission_id,
@@ -234,7 +305,13 @@ class SubmissionService:
             return None
 
         was_primary = image.is_primary
-        await self.storage.delete_file(image.image_url)
+        # The row stores a public URL; the storage API takes a key. Before
+        # storage was implemented, delete_file ignored its argument entirely,
+        # so passing the URL was harmless — it no longer is.
+        await self.storage.delete_file(
+            self.storage.key_from_url(image.image_url),
+            bucket=settings.SUPABASE_SUBMISSION_BUCKET,
+        )
         await self.db.delete(image)
         await self.db.flush()
 
@@ -263,15 +340,44 @@ class SubmissionService:
 
     async def update_status(
         self, submission_id: UUID, payload: SubmissionUpdate, reviewed_by: str
-    ) -> Submission | None:
-        """Approve or reject a submission (admin only)."""
+    ) -> tuple[Submission, Plant | None] | None:
+        """Approve or reject a submission (admin only).
+
+        Approving is a single transaction across three things: the submission
+        is marked reviewed, a `plants` row is created from the reviewer's
+        identification, and the photos are copied into `plant-images`. If the
+        copy fails the whole request fails and nothing is committed, so an
+        approved plant never ends up without its photographs.
+
+        The status transition is a guarded UPDATE rather than a read-modify-
+        write, so two reviewers acting at once cannot both succeed.
+        """
         submission = await self.get_by_id(submission_id)
         if submission is None:
             return None
-        submission.status = payload.status
-        submission.reviewer_notes = payload.reviewer_notes
-        submission.reviewed_by = reviewed_by
-        submission.reviewed_at = datetime.now(timezone.utc)
+
+        guard = await self.db.execute(
+            update(Submission)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .values(
+                status=payload.status,
+                reviewer_notes=payload.reviewer_notes,
+                reviewed_by=reviewed_by,
+                reviewed_at=datetime.now(timezone.utc),
+            )
+            .returning(Submission.id)
+        )
+        if guard.first() is None:
+            raise AlreadyReviewedError(submission.status)
+
+        plant: Plant | None = None
+        if payload.status == "approved" and payload.plant is not None:
+            plant = await self._create_plant(payload.plant, submission)
+            for image in await self._promote_photos(submission, plant.id):
+                self.db.add(image)
+            await self.db.flush()
+
         await self.db.flush()
-        await self.db.refresh(submission, attribute_names=["images"])
-        return submission
+        self.db.expire_all()
+        refreshed = await self.get_by_id(submission_id)
+        return (refreshed or submission), plant
