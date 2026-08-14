@@ -27,6 +27,7 @@ from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import (
     PENDING_STATUS,
     PlantIdentification,
+    SubmissionContentUpdate,
     SubmissionCreate,
     SubmissionFilter,
     SubmissionUpdate,
@@ -204,6 +205,138 @@ class SubmissionService:
         self.db.add(plant)
         await self.db.flush()
         return plant
+    async def update_content(
+        self, submission_id: UUID, payload: SubmissionContentUpdate
+    ) -> Submission | None:
+        """Apply a contributor's edit to a still-pending submission.
+
+        The write is a single conditional UPDATE guarded on
+        `status = 'pending'`, so a reviewer approving the submission at the
+        same moment cannot be overwritten: whichever statement commits first
+        wins and the other sees zero rows. Returning `None` therefore means
+        "someone reviewed it while you were editing", not "not found" — the
+        caller has already established that the row exists.
+
+        Only fields present in the request body are applied, so omitting a
+        field leaves it untouched rather than nulling it.
+        """
+        changes = payload.model_dump(exclude_unset=True)
+        if "contributor_name" in changes and changes["contributor_name"] is not None:
+            changes["contributor_name"] = str(changes["contributor_name"]).strip()
+
+        if not changes:
+            return await self.get_by_id(submission_id)
+
+        stmt = (
+            update(Submission)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .values(**changes)
+            .returning(Submission.id)
+        )
+        result = await self.db.execute(stmt)
+        if result.first() is None:
+            return None
+
+        await self.db.flush()
+        self.db.expire_all()
+        return await self.get_by_id(submission_id)
+
+    async def add_photos(
+        self, submission_id: UUID, photos: list[UploadFile]
+    ) -> Submission | None:
+        """Attach more photos to a pending submission.
+
+        Guarded the same way as `update_content`: the status is re-checked in
+        the database rather than trusted from the row we read earlier.
+        """
+        guard = await self.db.execute(
+            select(Submission.id).where(
+                Submission.id == submission_id, Submission.status == PENDING_STATUS
+            )
+        )
+        if guard.first() is None:
+            return None
+
+        existing = await self.db.scalar(
+            select(func.count(SubmissionImage.id)).where(
+                SubmissionImage.submission_id == submission_id
+            )
+        )
+        has_primary = bool(existing)
+
+        for photo in photos:
+            url = await self._store_photo(photo, submission_id)
+            self.db.add(
+                SubmissionImage(
+                    submission_id=submission_id,
+                    image_url=url,
+                    is_primary=not has_primary,
+                )
+            )
+            has_primary = True
+
+        await self.db.flush()
+        self.db.expire_all()
+        return await self.get_by_id(submission_id)
+
+    async def delete_photo(
+        self, submission_id: UUID, photo_id: UUID
+    ) -> Submission | None:
+        """Remove one photo from a pending submission.
+
+        Promotes another image to primary if the deleted one held that flag,
+        so a submission never ends up without a lead photo.
+        """
+        guard = await self.db.execute(
+            select(Submission.id).where(
+                Submission.id == submission_id, Submission.status == PENDING_STATUS
+            )
+        )
+        if guard.first() is None:
+            return None
+
+        image = await self.db.scalar(
+            select(SubmissionImage).where(
+                SubmissionImage.id == photo_id,
+                SubmissionImage.submission_id == submission_id,
+            )
+        )
+        if image is None:
+            return None
+
+        was_primary = image.is_primary
+        # The row stores a public URL; the storage API takes a key. Before
+        # storage was implemented, delete_file ignored its argument entirely,
+        # so passing the URL was harmless — it no longer is.
+        await self.storage.delete_file(
+            self.storage.key_from_url(image.image_url),
+            bucket=settings.SUPABASE_SUBMISSION_BUCKET,
+        )
+        await self.db.delete(image)
+        await self.db.flush()
+
+        if was_primary:
+            replacement = await self.db.scalar(
+                select(SubmissionImage)
+                .where(SubmissionImage.submission_id == submission_id)
+                .order_by(SubmissionImage.id.asc())
+                .limit(1)
+            )
+            if replacement is not None:
+                replacement.is_primary = True
+                await self.db.flush()
+
+        self.db.expire_all()
+        return await self.get_by_id(submission_id)
+
+    async def count_photos(self, submission_id: UUID) -> int:
+        """Number of images currently attached to `submission_id`."""
+        total = await self.db.scalar(
+            select(func.count(SubmissionImage.id)).where(
+                SubmissionImage.submission_id == submission_id
+            )
+        )
+        return int(total or 0)
 
     async def update_status(
         self, submission_id: UUID, payload: SubmissionUpdate, reviewed_by: str

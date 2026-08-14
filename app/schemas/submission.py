@@ -10,8 +10,12 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 SubmissionStatus = Literal["pending", "approved", "rejected"]
 ReviewAction = Literal["approved", "rejected"]
 
-#: The only status from which a review decision may be made.
+#: The only status in which a submission may still change — a contributor may
+#: edit it, and it is the only state a review decision can be made from.
 PENDING_STATUS = "pending"
+
+#: Upper bound on images per submission, enforced on create and when adding.
+MAX_PHOTOS_PER_SUBMISSION = 10
 
 
 class SubmissionImageOut(BaseModel):
@@ -132,3 +136,22 @@ class SubmissionUpdate(BaseModel):
         if self.status == "rejected" and self.plant is not None:
             raise ValueError("'plant' is only meaningful when approving.")
         return self
+
+
+class SubmissionContentUpdate(BaseModel):
+    """Contributor edit of their own still-pending submission.
+
+    Every field is optional and applied only when present in the request
+    body, so a client can send just the field it changed without blanking
+    the rest. `contributor_email` and `status` are deliberately absent:
+    ownership is derived from the email, and the status belongs to the
+    reviewer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contributor_name: str | None = Field(None, min_length=1, max_length=255)
+    user_description: str | None = None
+    location_state: str | None = None
+    latitude: Decimal | None = None
+    longitude: Decimal | None = None

@@ -49,6 +49,14 @@ class Settings(BaseSettings):
         "http://localhost:19006",
     ]
 
+    # --- Rate limiting (credential endpoints) ---
+    #: Attempts allowed per window, counted per client IP and per account.
+    LOGIN_RATE_LIMIT: int = 10
+    SIGNUP_RATE_LIMIT: int = 5
+    RATE_LIMIT_WINDOW_SECONDS: int = 300
+    #: Escape hatch for load tests and local scripting. Never enable in prod.
+    RATE_LIMIT_ENABLED: bool = True
+
     # --- Celery (optional) ---
     CELERY_BROKER_URL: str = ""
 
