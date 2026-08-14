@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 from httpx import AsyncClient
 from pydantic import ValidationError
+from sqlalchemy.exc import MissingGreenlet
 
 from app.api.v1 import submissions as api
 from app.db.session import get_db
@@ -25,6 +26,9 @@ from app.services.storage_service import StorageError, StoredFile
 from app.services.submission_service import AlreadyReviewedError, SubmissionService
 
 SUBMISSION_ID = UUID("33333333-3333-3333-3333-333333333333")
+
+#: Cache of the stand-in classes built by `_expire`, keyed by the real model.
+_EXPIRED_CLASSES: dict[type, type] = {}
 
 
 def _submission(status: str = "pending", images: int = 2) -> Submission:
@@ -58,12 +62,59 @@ def _submission(status: str = "pending", images: int = 2) -> Submission:
     return sub
 
 
+def _expire(instance: Any) -> type:
+    """Make every column read on `instance` fail, as an expired one does.
+
+    SQLAlchemy's `expire_all()` marks loaded attributes stale; the next read
+    re-queries the database. Under asyncio that read happens outside the
+    greenlet and raises `MissingGreenlet` instead of fetching. Returns the
+    original class so a later `get()` can undo it, which is what a real
+    reload does — the identity map hands back the same object, refreshed.
+    """
+    original = type(instance)
+    if original not in _EXPIRED_CLASSES:
+
+        def guard(self: Any, name: str) -> Any:
+            if name.startswith("__") or name == "_sa_instance_state":
+                return object.__getattribute__(self, name)
+            raise MissingGreenlet(
+                f"greenlet_spawn has not been called; reading {name!r} on an "
+                "expired instance would go to the database"
+            )
+
+        # Built once per model: each subclass of a declarative base registers
+        # itself, and rebuilding it per call floods the run with SAWarnings.
+        _EXPIRED_CLASSES[original] = type(
+            f"Expired{original.__name__}", (original,), {"__getattribute__": guard}
+        )
+    instance.__class__ = _EXPIRED_CLASSES[original]
+    return original
+
+
 class FakeSession:
-    """Records what the service writes, without a database."""
+    """Records what the service writes, without a database.
+
+    `expire_all` is modelled rather than stubbed out. The no-op version let
+    approval pass every test while returning 500 in production: the service
+    expired the Plant it had just created and handed that instance back, so
+    the endpoint's first read of `plant.id` tried to load from a closed
+    async context.
+    """
 
     def __init__(self) -> None:
         self.added: list[Any] = []
         self.guard_matches = True
+        self.reloaded: list[Any] = []
+        self._expired: list[tuple[Any, type, Any]] = []
+
+    async def get(self, model: type, primary_key: Any) -> Any:
+        """Undo expiry for the matching instance, as a real reload would."""
+        for instance, original, saved_pk in self._expired:
+            if isinstance(instance, model) and saved_pk == primary_key:
+                instance.__class__ = original
+                self.reloaded.append(primary_key)
+                return instance
+        return None
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -86,7 +137,10 @@ class FakeSession:
                 obj.id = 42
 
     def expire_all(self) -> None:
-        return None
+        for obj in self.added:
+            if isinstance(obj, Plant):
+                primary_key = obj.id  # read before expiring, or this raises
+                self._expired.append((obj, _expire(obj), primary_key))
 
     async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
         return None
@@ -362,3 +416,33 @@ def test_already_reviewed_error_reports_the_current_status() -> None:
 def test_warnings_helper_is_silent_for_a_rejection() -> None:
     """No plant, nothing to warn about."""
     assert api._identification_warnings(None) == []
+
+
+@pytest.mark.asyncio
+async def test_approved_plant_survives_the_identity_map_being_expired(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """Regression: approving returned 500 for every submission.
+
+    `update_status` ends with `expire_all()`, which invalidates the Plant it
+    had just created, and then returned that same instance. The endpoint
+    reads `plant.id` and its toxicity fields to build the response, so the
+    first attribute access attempted a lazy load in an async context and
+    raised MissingGreenlet — surfacing as a bare 500 with the submission
+    already marked approved and the photos already copied.
+
+    Every existing test passed because the fake session made `expire_all` a
+    no-op. It is modelled now, so this asserts the service hands back an
+    instance the caller can actually read.
+    """
+    state = review()
+
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json={"status": "approved", "plant": _identification()},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["plant_id"] == 42
+    assert state["session"].reloaded == [42], "the plant was not re-loaded after expiry"
