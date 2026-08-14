@@ -223,6 +223,68 @@ def test_key_from_url_tolerates_legacy_values() -> None:
 # ── disabled backend ─────────────────────────────────────────────────────────
 
 
+# ── credential hygiene ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("trailing", ["\n", "\r\n", " ", "\t"])
+def test_credentials_survive_a_trailing_newline(trailing: str) -> None:
+    """Secret Manager hands back whatever bytes it was given.
+
+    The usual ways of loading a secret append a newline — a PowerShell pipe
+    into `--data-file=-`, a here doc, `echo` without `-n`. Unstripped, the key
+    went into an `Authorization` header and httpx refused to send it, which
+    surfaced as HTTP 500 on every upload with nothing pointing at the secret.
+    """
+    from app.config import Settings
+
+    parsed = Settings(
+        SUPABASE_URL="https://proj.supabase.co" + trailing,
+        SUPABASE_SERVICE_ROLE_KEY="sb_secret_abc123" + trailing,
+        DATABASE_URL="postgresql+asyncpg://u:p@h/db" + trailing,
+    )
+    assert parsed.SUPABASE_SERVICE_ROLE_KEY == "sb_secret_abc123"
+    assert parsed.SUPABASE_URL == "https://proj.supabase.co"
+    assert parsed.DATABASE_URL == "postgresql+asyncpg://u:p@h/db"
+
+
+@pytest.mark.usefixtures("configured")
+def test_header_value_is_always_legal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever reaches the header must be something httpx will send."""
+    monkeypatch.setattr(settings, "SUPABASE_SERVICE_ROLE_KEY", "sb_secret_abc")
+    for value in StorageService()._headers("image/png").values():
+        assert "\n" not in value and "\r" not in value
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("configured")
+async def test_transport_failure_becomes_a_storage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure below the HTTP response must not escape as a bare 500.
+
+    The endpoint catches `StorageError` and answers 422. Anything else reaches
+    the generic handler, and the contributor is told "internal server error"
+    for what is really a broken deployment.
+    """
+
+    async def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise httpx.ConnectError("name resolution failed")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _boom)
+
+    with pytest.raises(StorageError, match="Storage request failed"):
+        await StorageService().upload_file(_upload(), "submissions/a/b.jpg")
+
+    with pytest.raises(StorageError, match="Storage request failed"):
+        await StorageService().copy_object(
+            source_key="a", destination_key="b",
+            source_bucket="submission-images", destination_bucket="plant-images",
+        )
+
+
+# ── disabled backend ─────────────────────────────────────────────────────────
+
+
 @pytest.mark.asyncio
 async def test_disabled_backend_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without credentials the service degrades instead of crashing."""
