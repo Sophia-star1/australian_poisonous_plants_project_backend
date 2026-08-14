@@ -4,10 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, UnauthorizedError
 from app.core.security import (
+    REFRESH_TOKEN_TYPE,
     create_access_token,
     create_refresh_token,
     verify_password,
+    verify_token,
 )
+from app.core.token_denylist import get_denylist
 from app.models.user import User
 from app.schemas.auth import LoginRequest, SignUpRequest, TokenResponse
 from app.schemas.user import UserCreate, UserOut
@@ -41,7 +44,14 @@ class AuthService:
         """
         existing = await self.users.get_by_email(payload.email)
         if existing is not None:
-            raise ConflictError("This email is already registered.")
+            # Deliberately generic: "This email is already registered" let
+            # anyone probe the API to learn which addresses hold an account.
+            # The detail belongs in the email we would send to the address
+            # itself, not in a response to whoever asked.
+            raise ConflictError(
+                "Could not create the account. If you already have one, try signing in "
+                "or resetting your password."
+            )
 
         user = await self.users.create(
             UserCreate(
@@ -57,6 +67,36 @@ class AuthService:
         user = await self.users.get_by_email(payload.email)
         if user is None or not verify_password(payload.password, user.hashed_password):
             raise UnauthorizedError("Incorrect email or password.")
+        if not user.is_active:
+            raise UnauthorizedError("Account is disabled.")
+        return self._issue_tokens(user)
+
+    async def refresh(self, refresh_token: str) -> TokenResponse:
+        """Exchange a valid refresh token for a brand-new token pair.
+
+        The user is re-read from the database so that a disabled account or a
+        changed role takes effect on refresh rather than persisting for the
+        remaining lifetime of the refresh token.
+        """
+        claims = verify_token(refresh_token, expected_type=REFRESH_TOKEN_TYPE)
+        if claims is None:
+            raise UnauthorizedError("Invalid or expired refresh token.")
+
+        jti = claims.get("jti")
+        if isinstance(jti, str) and await get_denylist().is_revoked(jti):
+            raise UnauthorizedError("Invalid or expired refresh token.")
+
+        sub = claims.get("sub")
+        if sub is None:
+            raise UnauthorizedError("Invalid token payload.")
+        try:
+            user_id = int(str(sub))
+        except ValueError as exc:
+            raise UnauthorizedError("Invalid token payload.") from exc
+
+        user = await self.users.get_by_id(user_id)
+        if user is None:
+            raise UnauthorizedError("User no longer exists.")
         if not user.is_active:
             raise UnauthorizedError("Account is disabled.")
         return self._issue_tokens(user)

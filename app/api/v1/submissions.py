@@ -32,10 +32,11 @@ from app.core.exceptions import (
     UnprocessableError,
 )
 from app.db.session import get_db
-from app.dependencies import get_current_active_user, require_role
+from app.dependencies import get_current_active_user, get_optional_user, require_admin
 from app.models.submission import Submission
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
+from app.schemas.role import UserRole
 from app.schemas.submission import (
     MAX_PHOTOS_PER_SUBMISSION,
     PENDING_STATUS,
@@ -67,7 +68,7 @@ async def _load_for_user(
     submission = await service.get_by_id(submission_id)
     if submission is None:
         raise NotFoundError(f"Submission {submission_id} not found.")
-    if user.role != "admin" and not _is_owner(submission, user):
+    if user.role != UserRole.ADMIN.value and not _is_owner(submission, user):
         raise NotFoundError(f"Submission {submission_id} not found.")
     return submission
 
@@ -94,14 +95,26 @@ async def create_submission(
     latitude: float | None = Form(None),
     longitude: float | None = Form(None),
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ) -> ApiResponse[SubmissionOut]:
     """Create a new observation from the mobile Upload tab.
 
     Upload one or more photos under the same `photos` field name.
     The first photo in the list is marked as the primary image.
+
+    Anonymous submissions are still accepted, but when a bearer token is
+    present the contributor identity is taken from it and the corresponding
+    form fields are ignored. `GET /submissions/me` matches on
+    `contributor_email`, so a client-supplied address was not merely a data
+    quality problem: submitting under someone else's email placed the record
+    in that person's list.
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
+
+    if current_user is not None:
+        contributor_email = current_user.email
+        contributor_name = current_user.full_name or current_user.email.split("@")[0]
 
     try:
         payload = SubmissionCreate(
@@ -255,7 +268,7 @@ async def list_all_submissions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_role("admin")),
+    _admin: User = Depends(require_admin),
 ) -> ApiResponse[PageResult[SubmissionOut]]:
     """Admin: list all submissions with optional filters."""
     filters = SubmissionFilter(
@@ -281,7 +294,7 @@ async def update_submission_status(
     submission_id: UUID,
     payload: SubmissionUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_admin),
 ) -> ApiResponse[SubmissionOut]:
     """Admin: approve or reject a submission."""
     svc = SubmissionService(db)
