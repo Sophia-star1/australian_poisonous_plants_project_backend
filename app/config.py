@@ -1,5 +1,6 @@
 """Application configuration via pydantic-settings."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,6 +8,39 @@ class Settings(BaseSettings):
     """Central configuration loaded from environment variables or .env file."""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @field_validator(
+        "DATABASE_URL",
+        "REDIS_URL",
+        "CELERY_BROKER_URL",
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_S3_ENDPOINT_URL",
+        mode="after",
+    )
+    @classmethod
+    def _strip_surrounding_whitespace(cls, value: str) -> str:
+        """Trim whitespace from credentials and connection strings.
+
+        Secret Manager stores exactly the bytes it was given, and the usual
+        ways of loading one append a newline — `printf` without `%s`, a here
+        doc, or a PowerShell pipe into `--data-file=-`. The newline then
+        travels into an HTTP header, where httpx rejects the value outright:
+
+            LocalProtocolError: Illegal header value b'Bearer sb_secret_...\\n'
+
+        That surfaced as a bare HTTP 500 on every photo upload with nothing in
+        the response to suggest a misconfigured secret. Whitespace carries no
+        meaning in any of these values, so stripping it is safe and removes a
+        failure mode that costs far more to diagnose than to prevent.
+
+        SECRET_KEY is deliberately excluded: it is opaque HMAC key material
+        where a trailing newline is harmless, and trimming it would invalidate
+        every token signed with the untrimmed value the moment this deploys.
+        """
+        return value.strip()
 
     # --- Core ---
     APP_NAME: str = "apl-backend"

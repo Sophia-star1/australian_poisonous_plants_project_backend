@@ -122,6 +122,23 @@ class StorageService:
             raise StorageError("File is empty.")
         return b"".join(chunks)
 
+    async def _post(self, url: str, headers: dict[str, str], **body: object) -> httpx.Response:
+        """POST to storage, turning transport failures into `StorageError`.
+
+        httpx raises for everything that happens below the HTTP response — a
+        DNS failure, a timeout, or a header value it refuses to put on the
+        wire. Those propagated untouched and reached the client as a bare 500,
+        so a credential with a stray newline was indistinguishable from a bug
+        in the endpoint. Callers now have exactly one exception type to handle,
+        and the cause is logged rather than swallowed.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                return await client.post(url, headers=headers, **body)  # type: ignore[arg-type]
+        except httpx.HTTPError as exc:
+            logger.error("storage_request_error", url=url, error=f"{type(exc).__name__}: {exc}")
+            raise StorageError(f"Storage request failed: {type(exc).__name__}.") from exc
+
     # ── operations ───────────────────────────────────────────────────────────
 
     async def upload_bytes(
@@ -133,10 +150,7 @@ class StorageService:
             return StoredFile(key=key, url=key)
 
         url = f"{self.base_url}/storage/v1/object/{bucket}/{key}"
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                url, content=data, headers=self._headers(content_type)
-            )
+        response = await self._post(url, self._headers(content_type), content=data)
         if response.status_code >= 400:
             logger.error(
                 "storage_upload_failed",
@@ -177,10 +191,7 @@ class StorageService:
             "destinationBucket": destination_bucket,
             "destinationKey": destination_key,
         }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                url, json=payload, headers=self._headers("application/json")
-            )
+        response = await self._post(url, self._headers("application/json"), json=payload)
         if response.status_code >= 400:
             logger.error(
                 "storage_copy_failed",
