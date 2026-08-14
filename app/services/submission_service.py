@@ -370,14 +370,22 @@ class SubmissionService:
         if guard.first() is None:
             raise AlreadyReviewedError(submission.status)
 
-        plant: Plant | None = None
+        plant_id: int | None = None
         if payload.status == "approved" and payload.plant is not None:
             plant = await self._create_plant(payload.plant, submission)
-            for image in await self._promote_photos(submission, plant.id):
+            plant_id = plant.id
+            for image in await self._promote_photos(submission, plant_id):
                 self.db.add(image)
             await self.db.flush()
 
         await self.db.flush()
+        # expire_all() marks every loaded attribute stale, including those of
+        # the Plant just created. Handing that instance back would make the
+        # caller's first attribute access a lazy load, which under asyncio
+        # raises MissingGreenlet rather than fetching -- the endpoint reads
+        # plant.id to build its response, so approving always returned 500.
+        # Reload explicitly, inside the async context where IO is allowed.
         self.db.expire_all()
         refreshed = await self.get_by_id(submission_id)
-        return (refreshed or submission), plant
+        reloaded = await self.db.get(Plant, plant_id) if plant_id is not None else None
+        return (refreshed or submission), reloaded
