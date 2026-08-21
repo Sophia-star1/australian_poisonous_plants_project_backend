@@ -12,6 +12,7 @@ Admin endpoints (`GET /submissions/`, `GET /submissions/{id}`,
 `PATCH /submissions/{id}`) support the reviewer workflow.
 """
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,6 +46,28 @@ class AlreadyReviewedError(RuntimeError):
     def __init__(self, current_status: str) -> None:
         super().__init__(f"Submission has already been {current_status}.")
         self.current_status = current_status
+
+
+_screening_semaphore: asyncio.Semaphore | None = None
+
+
+def _screening_slots() -> asyncio.Semaphore:
+    """Limit concurrent decoding, built lazily so the setting can be changed.
+
+    Created on first use rather than at import: a module-level semaphore
+    freezes `PLANT_SCREENING_CONCURRENCY` at import time, which makes it
+    untestable and ignores any value set after the module loads.
+    """
+    global _screening_semaphore
+    if _screening_semaphore is None:
+        _screening_semaphore = asyncio.Semaphore(settings.PLANT_SCREENING_CONCURRENCY)
+    return _screening_semaphore
+
+
+def reset_screening_limit() -> None:
+    """Drop the cached semaphore. For tests that change the setting."""
+    global _screening_semaphore
+    _screening_semaphore = None
 
 
 class NotAPlantError(ValueError):
@@ -115,10 +138,16 @@ class SubmissionService:
         verdicts: list[Verdict] = []
         for photo in photos:
             data = await self.storage.read_upload(photo, rewind=True)
-            # Inference is CPU-bound and takes ~90 ms. Run inline it would
-            # block the event loop, and with it every other request this
-            # instance is serving.
-            verdicts.append(await run_in_threadpool(classifier.classify, data))
+            # The semaphore bounds how much decoding happens at once. One
+            # photograph costs about 70 MB while it is being decoded, and
+            # Cloud Run puts 80 concurrent requests on an instance by
+            # default; without a limit a burst of uploads runs the instance
+            # out of memory and it is killed mid-request.
+            async with _screening_slots():
+                # Inference is CPU-bound and takes ~90 ms. Run inline it would
+                # block the event loop, and with it every other request this
+                # instance is serving.
+                verdicts.append(await run_in_threadpool(classifier.classify, data))
 
         if all(v.decision is Decision.REJECT for v in verdicts):
             raise NotAPlantError([v.confidence for v in verdicts])

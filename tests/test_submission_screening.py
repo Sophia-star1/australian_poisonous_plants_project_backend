@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -31,6 +32,15 @@ from app.main import app
 from app.ml.classifier import Decision, UndecodableImageError, Verdict, reset_classifier
 from app.services import submission_service as svc
 from app.services.storage_service import StoredFile
+
+
+def _upload(data: bytes, name: str = "a.jpg") -> Any:
+    """A minimal UploadFile the screening path can read and rewind."""
+    from starlette.datastructures import Headers, UploadFile
+
+    return UploadFile(
+        file=io.BytesIO(data), filename=name, headers=Headers({"content-type": "image/jpeg"})
+    )
 
 
 class FakeSession:
@@ -334,3 +344,41 @@ async def test_oversized_photos_are_caught_during_screening(
     assert response.status_code == 422
     assert "upload limit" in response.json()["message"]
     assert uploads == []
+
+
+# ── bounded concurrency ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_only_so_many_photos_are_decoded_at_once(monkeypatch: Any) -> None:
+    """Decoding is where the memory goes, so it has to be bounded.
+
+    One 1919x2560 photograph costs about 70 MB while being decoded, and Cloud
+    Run puts 80 concurrent requests on an instance by default. Unbounded that
+    is several GB: the instance is killed and every request in flight dies
+    with it, including the ones that were nearly done.
+    """
+    import asyncio
+
+    monkeypatch.setattr(settings, "PLANT_SCREENING_CONCURRENCY", 2)
+    svc.reset_screening_limit()
+
+    in_flight = 0
+    high_water = 0
+
+    class _Slow:
+        def classify(self, data: bytes) -> Verdict:
+            nonlocal in_flight, high_water
+            in_flight += 1
+            high_water = max(high_water, in_flight)
+            time.sleep(0.02)
+            in_flight -= 1
+            return Verdict(decision=Decision.ACCEPT, confidence=0.9)
+
+    monkeypatch.setattr(svc, "get_classifier", lambda: _Slow())
+
+    service = svc.SubmissionService(FakeSession())  # type: ignore[arg-type]
+    await asyncio.gather(*(service.screen([_upload(_jpeg())]) for _ in range(6)))
+
+    assert high_water <= 2, f"{high_water} photos were decoded at once, limit was 2"
+    svc.reset_screening_limit()

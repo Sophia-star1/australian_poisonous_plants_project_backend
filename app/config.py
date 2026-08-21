@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     #: At or above this the photo counts as a plant. Anything in between is
     #: accepted but marked for the reviewer rather than refused.
     PLANT_ACCEPT_AT: float = 0.70
+    #: How many photos may be decoded and scored at the same time.
+    #: Decoding is where the memory goes — measured at ~70 MB for one 1919x2560
+    #: photograph — and Cloud Run defaults to 80 concurrent requests per
+    #: instance. Unbounded, a burst of uploads reaches several GB and the
+    #: instance is killed, taking every in-flight request with it. Bounding
+    #: the screening rather than the whole service keeps cheap requests, such
+    #: as browsing plants, from queueing behind an upload.
+    PLANT_SCREENING_CONCURRENCY: int = 4
 
     # --- CORS ---
     ALLOWED_ORIGINS: list[str] = [
