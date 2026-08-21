@@ -19,6 +19,14 @@ dependencies = [
     "structlog",
     "python-multipart",
     "httpx",
+    # Plant screening. ONNX Runtime rather than torch: the exported graph is
+    # numerically identical (1.4e-06 over random inputs) at 97 MB installed
+    # instead of 726 MB, and 110 MB resident instead of 426 MB. Cloud Run has
+    # a hard memory cap, so that gap decides whether the service starts.
+    "onnxruntime>=1.17",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
@@ -85,3 +93,9 @@ packages = ["app"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[[tool.mypy.overrides]]
+# onnxruntime ships no py.typed marker and no stubs on PyPI. Without this the
+# import alone is an error, which buries the errors that matter.
+module = ["onnxruntime.*"]
+ignore_missing_imports = true

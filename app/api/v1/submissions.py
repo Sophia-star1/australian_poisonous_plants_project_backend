@@ -34,6 +34,7 @@ from app.core.exceptions import (
 )
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
+from app.ml.classifier import UndecodableImageError
 from app.models.plant import Plant
 from app.models.submission import Submission
 from app.models.user import User
@@ -51,7 +52,11 @@ from app.schemas.submission import (
     SubmissionUpdate,
 )
 from app.services.storage_service import StorageError
-from app.services.submission_service import AlreadyReviewedError, SubmissionService
+from app.services.submission_service import (
+    AlreadyReviewedError,
+    NotAPlantError,
+    SubmissionService,
+)
 
 router = APIRouter()
 
@@ -189,6 +194,18 @@ async def create_submission(
 
     try:
         row = await SubmissionService(db).create(payload=payload, photos=photos)
+    except NotAPlantError as exc:
+        # Screening is confident none of the photos show a plant. Said plainly
+        # so the contributor can fix it and retry, rather than as a generic
+        # rejection they cannot act on.
+        raise UnprocessableError(str(exc)) from exc
+    except UndecodableImageError as exc:
+        # The declared content type said image; the bytes disagree. Caught
+        # here only because screening is the first thing that tries to decode
+        # them — worth refusing either way, since a reviewer cannot look at it.
+        raise UnprocessableError(
+            "One of the files is not a readable image. Re-export it and try again."
+        ) from exc
     except StorageError as exc:
         # Surface the storage failure instead of writing a submission whose
         # photos do not exist. The session rolls back with the request.

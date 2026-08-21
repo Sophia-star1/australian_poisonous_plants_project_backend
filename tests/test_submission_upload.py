@@ -16,6 +16,7 @@ from app.api.v1 import submissions as api
 from app.config import settings
 from app.db.session import get_db
 from app.main import app
+from app.ml.classifier import reset_classifier
 from app.services.storage_service import StorageError, StoredFile
 
 
@@ -64,6 +65,20 @@ def _no_database() -> AsyncIterator[None]:
     app.dependency_overrides[get_db] = _fake_db
     yield
     app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture(autouse=True)
+def _no_screening(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about storage keys, not about the classifier.
+
+    The photo bodies here are a few bytes of nothing, which is not a decodable
+    image; with screening on, every one of them would be refused before
+    reaching the code under test. Screening has its own tests — see
+    `test_submission_screening.py` — and turning it off here keeps each file
+    testing one thing.
+    """
+    monkeypatch.setattr(settings, "PLANT_CLASSIFIER_ENABLED", False)
+    reset_classifier()
 
 
 @pytest.fixture

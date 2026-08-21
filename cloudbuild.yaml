@@ -35,8 +35,12 @@ steps:
       - "0"
       - "--max-instances"
       - "10"
+      # 1Gi rather than 512Mi: the screening model is ~110 MB resident once
+      # loaded, and decoding a phone photo costs more again — a 4000x3000
+      # JPEG is 36 MB of raw RGB before it is resized. At 512Mi the container
+      # is killed rather than answering slowly, so this is not a tuning knob.
       - "--memory"
-      - "512Mi"
+      - "1Gi"
       - "--cpu"
       - "1"
       # NOTE: --set-env-vars and --set-secrets REPLACE the whole set on every

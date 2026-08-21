@@ -17,3 +17,9 @@ htmlcov/
 .coverage
 docker-compose.yml
 .pre-commit-config.yaml
+
+# The TorchScript file the model author delivered. Kept in git so the ONNX
+# export can be reproduced or re-checked, but the runtime loads only the ONNX
+# graph — shipping both would put 17 MB into every image and every cold start
+# for nothing.
+*.torchscript.pt
