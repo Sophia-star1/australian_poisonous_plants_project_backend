@@ -27,3 +27,20 @@ Dockerfile  text eol=lf
 *.woff      binary
 *.woff2     binary
 *.ttf       binary
+
+# 机器学习模型权重。必须显式声明为 binary：仓库顶部的 `* text=auto eol=lf`
+# 依赖启发式判断文件是否为二进制，一旦判断失误就会改写 checkpoint 内部的
+# 字节，得到一个能通过 git 校验、却在加载时报错的损坏模型。
+*.pt        binary
+*.pth       binary
+*.onnx      binary
+*.tflite    binary
+*.h5        binary
+*.keras     binary
+*.pb        binary
+*.safetensors binary
+*.pkl       binary
+*.joblib    binary
+*.npy       binary
+*.npz       binary
+*.bin       binary
