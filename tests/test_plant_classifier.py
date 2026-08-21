@@ -226,10 +226,24 @@ def test_repeated_calls_agree() -> None:
 
 
 @model_required
-def test_photographs_of_nothing_are_rejected() -> None:
-    """A blank frame is the clearest case of 'not a plant'."""
-    blank = _png(Image.new("RGB", (400, 400), (255, 255, 255)))
-    assert PlantClassifier().classify(blank).decision is not Decision.ACCEPT
+def test_a_blank_frame_is_not_accepted_but_is_not_refused_either() -> None:
+    """Documents a real limit rather than asserting a hope.
+
+    A plain white frame scores about 0.32 — above the refusal floor, so it is
+    let through and flagged. The specimen photograph in this project's own
+    library that the model is certain about scores 0.0000 and *is* refused.
+    The ordering is therefore wrong for this purpose: no single cutoff
+    separates blank frames from legitimate specimen shots.
+
+    The refusal band is still worth having because the model was trained
+    against food, dogs and faces, which is what casual misuse actually looks
+    like. But it is not a general "is this rubbish" detector, and this test
+    exists so nobody later assumes it is.
+    """
+    classifier = PlantClassifier()
+    blank = classifier.classify(_png(Image.new("RGB", (400, 400), (255, 255, 255))))
+    assert blank.decision is Decision.FLAG
+    assert blank.confidence > classifier.reject_below
 
 
 # ── availability ─────────────────────────────────────────────────────────────

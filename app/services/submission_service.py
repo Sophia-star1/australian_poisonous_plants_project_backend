@@ -13,15 +13,19 @@ Admin endpoints (`GET /submissions/`, `GET /submissions/{id}`,
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.ml.classifier import Decision, Verdict, get_classifier
 from app.models.plant import Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import (
@@ -43,12 +47,86 @@ class AlreadyReviewedError(RuntimeError):
         self.current_status = current_status
 
 
+class NotAPlantError(ValueError):
+    """Raised when screening is confident that no photo shows a plant."""
+
+    def __init__(self, probabilities: list[float]) -> None:
+        best = max(probabilities) if probabilities else 0.0
+        super().__init__(
+            "None of the uploaded photos appear to show a plant "
+            f"(highest confidence {best:.0%}). Please upload a photo of the "
+            "plant itself — a leaf, flower, fruit, bark or the whole plant."
+        )
+        self.probabilities = probabilities
+
+
+@dataclass(frozen=True, slots=True)
+class Screening:
+    """What screening concluded about a whole submission."""
+
+    is_plant: bool
+    per_photo: list[Verdict]
+
+    @property
+    def best(self) -> float:
+        return max((v.confidence for v in self.per_photo), default=0.0)
+
+    def as_record(self) -> dict[str, Any]:
+        """Shape written to `submissions.ai_top_matches`."""
+        return {
+            "screening": {
+                "plant_probability": self.best,
+                "photos": [v.as_dict() for v in self.per_photo],
+            }
+        }
+
+
 class SubmissionService:
     """Create, list, and read plant observation submissions."""
 
     def __init__(self, db: AsyncSession, storage: StorageService | None = None) -> None:
         self.db = db
         self.storage = storage or StorageService()
+
+    async def screen(self, photos: list[UploadFile]) -> Screening | None:
+        """Score every photo before a single byte reaches storage.
+
+        Returns `None` when screening is unavailable — no weights, or the
+        feature switched off. That is "no opinion", never a rejection: a
+        classifier that cannot load must not take the upload path down with
+        it.
+
+        The submission is refused only when *every* photo is a confident
+        negative. Refusing on any single one would be harsher than the model
+        earns: it turns away 7 of the 104 photographs in this project's own
+        curated library at its default cutoff, and one stray frame among
+        several is far more likely to be an honest mistake than an abuse. A
+        photo in the uncertain band still goes through, marked for the
+        reviewer rather than bounced back at the contributor.
+
+        Each photo is read, scored, then released, so peak memory is one
+        photo rather than all ten. `rewind` leaves the handle ready for the
+        upload path to read again.
+        """
+        classifier = get_classifier()
+        if classifier is None:
+            return None
+
+        verdicts: list[Verdict] = []
+        for photo in photos:
+            data = await self.storage.read_upload(photo, rewind=True)
+            # Inference is CPU-bound and takes ~90 ms. Run inline it would
+            # block the event loop, and with it every other request this
+            # instance is serving.
+            verdicts.append(await run_in_threadpool(classifier.classify, data))
+
+        if all(v.decision is Decision.REJECT for v in verdicts):
+            raise NotAPlantError([v.confidence for v in verdicts])
+
+        return Screening(
+            is_plant=any(v.decision is Decision.ACCEPT for v in verdicts),
+            per_photo=verdicts,
+        )
 
     async def _store_photo(self, photo: UploadFile, submission_id: UUID) -> str:
         """Upload one photo and return the URL to record against the row.
@@ -75,7 +153,13 @@ class SubmissionService:
         happen first on purpose: if storage fails the request aborts and the
         transaction rolls back, so a submission never exists with photos that
         do not.
+
+        Screening runs before the uploads for the same reason in reverse — a
+        refused submission should cost nothing in storage, so the photos are
+        scored while they are still only in the request body.
         """
+        screening = await self.screen(photos)
+
         submission_id = uuid4()
         sub = Submission(
             id=submission_id,
@@ -86,6 +170,9 @@ class SubmissionService:
             latitude=payload.latitude,
             longitude=payload.longitude,
             status="pending",
+            # NULL when screening did not run, which is distinct from False.
+            ai_is_plant=screening.is_plant if screening else None,
+            ai_top_matches=screening.as_record() if screening else None,
         )
 
         for i, photo in enumerate(photos):

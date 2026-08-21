@@ -99,12 +99,18 @@ class StorageService:
         """
         return f"{self.base_url}/storage/v1/object/public/{bucket}/{key}"
 
-    async def read_upload(self, file: UploadFile) -> bytes:
+    async def read_upload(self, file: UploadFile, *, rewind: bool = False) -> bytes:
         """Read an upload into memory, refusing anything oversized.
 
         Reads in chunks and stops at the limit rather than loading the whole
         body first, so an attacker cannot exhaust memory by declaring a small
         Content-Length and sending more.
+
+        `rewind` leaves the handle open and positioned at the start instead of
+        closing it, so the same upload can be read again. Screening needs the
+        bytes before the upload path does; without this the choice would be
+        between holding every photo in memory at once — ten of them, ten MB
+        each — and uploading first only to delete again on a rejection.
         """
         limit = settings.MAX_UPLOAD_BYTES
         chunks: list[bytes] = []
@@ -117,7 +123,10 @@ class StorageService:
                     f"File exceeds the {limit // (1024 * 1024)} MB upload limit."
                 )
             chunks.append(chunk)
-        await file.close()
+        if rewind:
+            await file.seek(0)
+        else:
+            await file.close()
         if total == 0:
             raise StorageError("File is empty.")
         return b"".join(chunks)

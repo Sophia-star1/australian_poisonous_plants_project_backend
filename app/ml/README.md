@@ -99,22 +99,38 @@ A `models/` directory at the repository root would be built into the image and
 then dropped from it — the code would work locally and fail in Cloud Run with
 a missing-file error on the first upload after deploy.
 
-## Where it plugs in (not wired up yet)
+## Where it plugs in
 
-`submissions` already carries two columns for this, unused so far:
+`SubmissionService.screen()`, called from `create()` before any upload.
 
-| column           | type    | meaning                                  |
-| ---------------- | ------- | ---------------------------------------- |
-| `ai_is_plant`    | boolean | verdict, `NULL` when screening was skipped |
-| `ai_top_matches` | jsonb   | scores, for a reviewer to second-guess with |
+```
+POST /submissions/
+  ├─ content-type whitelist, photo count           existing checks
+  ├─ screen(): read → classify → rewind            ← here
+  │     every photo REJECT  → 422, nothing stored
+  │     otherwise           → carry on
+  ├─ upload each photo to submission-images
+  └─ insert the row, with ai_is_plant / ai_top_matches
+```
 
-So the result has somewhere to live without a migration.
+Screening runs first so a refusal costs no storage — uploading and then
+deleting would pay bandwidth for exactly the traffic this exists to turn away.
+Each photo is read, scored, and released, so peak memory is one photo rather
+than all ten; `read_upload(rewind=True)` leaves the handle at the start for the
+upload that follows. Without that rewind the upload reads an already-consumed
+file and stores nothing, with no error anywhere, which is what
+`test_submission_screening.py` pins first.
 
-The call belongs in `SubmissionService.create`, next to the upload: photos are
-already read into memory there, and a rejection has to happen **before** the
-first byte reaches storage, otherwise a refused submission still leaves files
-in the bucket. `StorageError` is already mapped to a 422 by the endpoint, so a
-rejection can follow the same path.
+The verdict lands in columns that already existed:
+
+| column           | type    | meaning                                       |
+| ---------------- | ------- | --------------------------------------------- |
+| `ai_is_plant`    | boolean | `NULL` when screening did not run — distinct from `false` |
+| `ai_top_matches` | jsonb   | `{"screening": {"plant_probability": …, "photos": […]}}` |
+
+**A submission is refused only when every photo is a confident negative.** One
+stray frame among several is far more likely to be an honest mistake than
+abuse, and the model is not accurate enough to be given that authority.
 
 ## Still outstanding before this can be switched on
 
