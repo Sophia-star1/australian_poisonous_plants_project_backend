@@ -1,0 +1,5 @@
+chosen_threshold: 0.7
+class_to_idx:
+  not_plant: 0
+  plant: 1
+img_size: 224

@@ -76,6 +76,21 @@ class Settings(BaseSettings):
     MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     ALLOWED_IMAGE_TYPES: list[str] = ["image/jpeg", "image/png", "image/webp"]
 
+    # --- Plant screening ---
+    #: Off switch. The classifier also stays out of the way on its own when
+    #: the weights are missing, so a checkout without them still boots.
+    PLANT_CLASSIFIER_ENABLED: bool = True
+    #: Below this the upload is refused. Deliberately far under the model's
+    #: own 0.7 cutoff: measured against this project's curated library — 104
+    #: photographs, all genuinely plants — 0.7 turns away 7 of them, while
+    #: 0.10 turns away 1. The rejected ones are specimen shots, bark close-ups
+    #: and non-green plant parts, which is the sort of photograph this
+    #: database exists to collect.
+    PLANT_REJECT_BELOW: float = 0.10
+    #: At or above this the photo counts as a plant. Anything in between is
+    #: accepted but marked for the reviewer rather than refused.
+    PLANT_ACCEPT_AT: float = 0.70
+
     # --- CORS ---
     ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",
