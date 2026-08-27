@@ -23,7 +23,11 @@ from app.models.submission import Submission, SubmissionImage
 from app.models.user import User
 from app.schemas.submission import PlantIdentification, SubmissionUpdate
 from app.services.storage_service import StorageError, StoredFile
-from app.services.submission_service import AlreadyReviewedError, SubmissionService
+from app.services.submission_service import (
+    AlreadyReviewedError,
+    SubmissionService,
+    submission_fingerprint,
+)
 
 SUBMISSION_ID = UUID("33333333-3333-3333-3333-333333333333")
 
@@ -216,6 +220,16 @@ def review(monkeypatch: pytest.MonkeyPatch) -> Any:
     app.dependency_overrides.clear()
 
 
+def _review(state: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """A review body carrying the version the reviewer would have been shown."""
+    body: dict[str, Any] = {
+        "status": "approved",
+        "expected_version": submission_fingerprint(state["submission"]),
+    }
+    body.update(overrides)
+    return body
+
+
 def _identification(**overrides: Any) -> dict[str, Any]:
     base = {"botanical_name": "Nerium oleander"}
     base.update(overrides)
@@ -228,13 +242,17 @@ def _identification(**overrides: Any) -> dict[str, Any]:
 def test_approval_requires_an_identification() -> None:
     """A submission has no botanical_name, so approval cannot infer one."""
     with pytest.raises(ValidationError, match="requires 'plant'"):
-        SubmissionUpdate(status="approved")
+        SubmissionUpdate(status="approved", expected_version="v1")
 
 
 def test_rejection_must_not_carry_an_identification() -> None:
     """Rejecting and publishing at once is incoherent."""
     with pytest.raises(ValidationError, match="only meaningful when approving"):
-        SubmissionUpdate(status="rejected", plant=PlantIdentification(botanical_name="X"))
+        SubmissionUpdate(
+            status="rejected",
+            expected_version="v1",
+            plant=PlantIdentification(botanical_name="X"),
+        )
 
 
 def test_identification_rejects_unknown_fields() -> None:
@@ -260,14 +278,14 @@ async def test_approval_creates_a_plant_and_promotes_photos(
     state = review()
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={
-            "status": "approved",
-            "plant": _identification(
+        json=_review(
+            state,
+            plant=_identification(
                 toxic_to_humans=True,
                 toxic_parts=["Leaves", "Seeds"],
                 health_effects={"symptoms": ["nausea"]},
             ),
-        },
+        ),
     )
     assert response.status_code == 200, response.text
     body = response.json()["data"]
@@ -291,7 +309,7 @@ async def test_promoted_images_keep_one_primary(
     state = review()
     await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "approved", "plant": _identification()},
+        json=_review(state, plant=_identification()),
     )
     images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
     assert len(images) == 2
@@ -306,7 +324,7 @@ async def test_observed_location_is_carried_into_the_plant(
     state = review()
     await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "approved", "plant": _identification()},
+        json=_review(state, plant=_identification()),
     )
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
     assert plant.distribution_observed == ["NSW"]
@@ -320,10 +338,7 @@ async def test_reviewer_supplied_distribution_wins(
     state = review()
     await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={
-            "status": "approved",
-            "plant": _identification(distribution_observed=["QLD", "NT"]),
-        },
+        json=_review(state, plant=_identification(distribution_observed=["QLD", "NT"])),
     )
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
     assert plant.distribution_observed == ["QLD", "NT"]
@@ -334,10 +349,10 @@ async def test_missing_toxicity_data_is_flagged(
     async_client: AsyncClient, review: Any
 ) -> None:
     """Publishing silence about toxicity should not be quiet."""
-    review()
+    state = review()
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "approved", "plant": _identification()},
+        json=_review(state, plant=_identification()),
     )
     warnings = response.json()["data"]["warnings"]
     assert any("No toxicity recorded" in w for w in warnings)
@@ -349,17 +364,17 @@ async def test_complete_identification_produces_no_warnings(
     async_client: AsyncClient, review: Any
 ) -> None:
     """A fully filled entry is not nagged."""
-    review()
+    state = review()
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={
-            "status": "approved",
-            "plant": _identification(
+        json=_review(
+            state,
+            plant=_identification(
                 toxic_to_humans=True,
                 toxic_parts=["Leaves"],
                 health_effects={"symptoms": ["nausea"]},
             ),
-        },
+        ),
     )
     assert response.json()["data"]["warnings"] == []
 
@@ -372,10 +387,10 @@ async def test_copy_failure_aborts_the_approval(
     async_client: AsyncClient, review: Any
 ) -> None:
     """A published plant with no photographs is worse than a failed review."""
-    review(copy_fails=True)
+    state = review(copy_fails=True)
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "approved", "plant": _identification()},
+        json=_review(state, plant=_identification()),
     )
     assert response.status_code == 422
     assert "Could not copy the photos" in response.json()["message"]
@@ -384,10 +399,10 @@ async def test_copy_failure_aborts_the_approval(
 @pytest.mark.asyncio
 async def test_second_reviewer_gets_409(async_client: AsyncClient, review: Any) -> None:
     """The guarded UPDATE matched nothing: someone decided first."""
-    review(guard=False)
+    state = review(guard=False)
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "approved", "plant": _identification()},
+        json=_review(state, plant=_identification()),
     )
     assert response.status_code == 409
 
@@ -398,7 +413,7 @@ async def test_rejection_creates_no_plant(async_client: AsyncClient, review: Any
     state = review()
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "rejected", "reviewer_notes": "blurry photo"},
+        json=_review(state, status="rejected", reviewer_notes="blurry photo"),
     )
     assert response.status_code == 200
     assert response.json()["data"]["plant_id"] is None
@@ -439,7 +454,7 @@ async def test_approved_plant_survives_the_identity_map_being_expired(
 
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "approved", "plant": _identification()},
+        json=_review(state, plant=_identification()),
     )
 
     assert response.status_code == 200, response.text

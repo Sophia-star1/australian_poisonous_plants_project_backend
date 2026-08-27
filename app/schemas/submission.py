@@ -1,11 +1,13 @@
 """Submission request/response schemas — match real Supabase schema."""
 
+import hashlib
+from collections.abc import Iterable
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, model_validator
 
 SubmissionStatus = Literal["pending", "approved", "rejected"]
 ReviewAction = Literal["approved", "rejected"]
@@ -16,6 +18,53 @@ PENDING_STATUS = "pending"
 
 #: Upper bound on images per submission, enforced on create and when adding.
 MAX_PHOTOS_PER_SUBMISSION = 10
+
+
+def content_fingerprint(
+    *,
+    contributor_name: str,
+    user_description: str | None,
+    location_state: str | None,
+    latitude: Decimal | float | None,
+    longitude: Decimal | float | None,
+    photos: Iterable[tuple[UUID | str, bool]],
+) -> str:
+    """A short digest of everything a reviewer looks at before deciding.
+
+    Optimistic concurrency without a schema change. `submissions` has no
+    version column and the database is not managed by Alembic — no migration
+    history, no `alembic_version` table — so adding one means hand-editing
+    production. This asks the question directly instead: has any of what the
+    reviewer saw changed since they loaded it?
+
+    Photos are included because they are the part that matters most. A
+    contributor swapping one while the reviewer reads would otherwise publish
+    a photograph nobody approved.
+
+    Deliberately excluded: `status`, `reviewer_notes`, `reviewed_by`,
+    `reviewed_at`. Those belong to the reviewer, and folding them in would
+    make a reviewer's own write invalidate the version they are holding.
+    """
+    parts = [
+        contributor_name or "",
+        user_description or "",
+        location_state or "",
+        _number(latitude),
+        _number(longitude),
+    ]
+    # Sorted: the order rows come back in is not part of what changed.
+    parts += [f"{pid}:{int(primary)}" for pid, primary in sorted(
+        ((str(pid), bool(primary)) for pid, primary in photos)
+    )]
+    joined = "\x1f".join(parts).encode()
+    return hashlib.blake2b(joined, digest_size=8).hexdigest()
+
+
+def _number(value: Decimal | float | None) -> str:
+    """Normalise a coordinate so 1.50 and 1.5 do not read as a change."""
+    if value is None:
+        return ""
+    return format(Decimal(str(value)).normalize(), "f")
 
 
 class SubmissionImageOut(BaseModel):
@@ -59,6 +108,23 @@ class SubmissionOut(BaseModel):
     reviewed_at: datetime | None = None
     submitted_at: datetime
     images: list[SubmissionImageOut] = Field(default_factory=list)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def content_version(self) -> str:
+        """What a reviewer must send back to prove they saw this version.
+
+        Derived rather than stored, so it cannot drift from the content it
+        describes and needs no column of its own.
+        """
+        return content_fingerprint(
+            contributor_name=self.contributor_name,
+            user_description=self.user_description,
+            location_state=self.location_state,
+            latitude=self.latitude,
+            longitude=self.longitude,
+            photos=[(image.id, image.is_primary) for image in self.images],
+        )
 
 
 class SubmissionReviewResult(BaseModel):
@@ -198,9 +264,20 @@ class SubmissionUpdate(BaseModel):
     new row in `plants` with the submission's photos copied across.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     status: ReviewAction
     reviewer_notes: str | None = None
     plant: PlantIdentification | None = None
+    #: The `content_version` the reviewer was looking at. Required, not
+    #: optional: a guard a client can forget to send is not a guard, and
+    #: approving publishes photographs — the one thing that must not turn out
+    #: to be different from what was reviewed.
+    expected_version: str = Field(
+        ...,
+        min_length=1,
+        description="The submission's content_version as returned by GET; a mismatch is 409.",
+    )
 
     @model_validator(mode="after")
     def _identification_required_to_approve(self) -> "SubmissionUpdate":
