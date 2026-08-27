@@ -81,6 +81,67 @@ class SubmissionFilter(BaseModel):
     page_size: int = Field(20, ge=1, le=100)
 
 
+class ToxinProfile(BaseModel):
+    """What the poison is and how fast it acts.
+
+    The keys come from the ten entries already in `plants`, every one of which
+    carries all three. They were free-form `dict` until now, which meant two
+    reviewers could describe the same thing under different names and no
+    client could rely on finding either.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The toxic compound or compounds, e.g. "Abrin".
+    toxins: str | None = None
+    #: Chemical family, e.g. "toxalbumin / plant lectin".
+    chemical_class: str | None = None
+    #: How long before symptoms appear, e.g. "delayed 6-24 hours".
+    onset: str | None = None
+
+
+class HealthEffects(BaseModel):
+    """What exposure does to a person or animal.
+
+    This is the field triage actually reads, so `symptoms` is a list rather
+    than prose: it is what a symptom search has to match against.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Individual symptoms, e.g. ["vomiting", "diarrhoea", "abdominal pain"].
+    symptoms: list[str] | None = None
+    #: The clinical pattern, e.g. "gastrointestinal and systemic toxicity".
+    toxidrome: str | None = None
+    #: Systems affected, e.g. ["gastrointestinal", "hepatic"].
+    target_organs: list[str] | None = None
+
+
+class MorphologicalAttributes(BaseModel):
+    """How to recognise the plant.
+
+    Unlike the other two this one stays open. The named keys are what the
+    existing entries use — `growth_habit`, `life_history` and `flower` appear
+    in all ten, the rest in some — but describing a plant is not a closed set,
+    and a reviewer who needs to record a bulb or a rhizome should not have to
+    wait for a schema change. Extra keys are kept as given.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    #: Present in every existing entry.
+    growth_habit: str | None = None
+    life_history: str | None = None
+    flower: str | None = None
+    #: Present in some.
+    leaf: str | None = None
+    fruit: str | None = None
+    sap: str | None = None
+    stem: str | None = None
+    odor: str | None = None
+    armament: str | None = None
+
+
 class PlantIdentification(BaseModel):
     """The botanical record a reviewer supplies when approving a submission.
 
@@ -109,10 +170,25 @@ class PlantIdentification(BaseModel):
     toxic_to_humans: bool | None = None
     toxic_to_animals: list[str] | None = None
     lethality: str | None = None
-    toxin_profile: dict[str, Any] | None = None
-    health_effects: dict[str, Any] | None = None
-    morphological_attributes: dict[str, Any] | None = None
+    toxin_profile: ToxinProfile | None = None
+    health_effects: HealthEffects | None = None
+    morphological_attributes: MorphologicalAttributes | None = None
     historical_case_records: str | None = None
+
+    @model_validator(mode="after")
+    def _drop_empty_structures(self) -> "PlantIdentification":
+        """Treat a nested object with nothing in it as absent.
+
+        `{"toxin_profile": {}}` and omitting the field mean the same thing to
+        a reviewer, but storing `{}` would make `health_effects` truthy and
+        silence the warning that says nothing is recorded — the entry would
+        look answered while saying nothing.
+        """
+        for name in ("toxin_profile", "health_effects", "morphological_attributes"):
+            value = getattr(self, name)
+            if value is not None and not value.model_dump(exclude_none=True):
+                setattr(self, name, None)
+        return self
 
 
 class SubmissionUpdate(BaseModel):
