@@ -51,11 +51,11 @@ steps:
       # The leading ^;^ switches the delimiter to ';' because ALLOWED_ORIGINS
       # contains commas.
       - "--set-env-vars"
-      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:8081","http://localhost:19006"];SUPABASE_URL=${_SUPABASE_URL}'
+      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:8081","http://localhost:19006"];SUPABASE_URL=${_SUPABASE_URL};EMAIL_FROM=${_EMAIL_FROM}'
       # The Supabase secret key bypasses row level security: Secret Manager
       # only, never an env var and never a client bundle.
       - "--set-secrets"
-      - "SECRET_KEY=secret-key:latest,DATABASE_URL=database-url:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-secret-key:latest"
+      - "SECRET_KEY=secret-key:latest,DATABASE_URL=database-url:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-secret-key:latest,RESEND_API_KEY=resend-api-key:latest"
 
 substitutions:
   _SERVICE_NAME: apl-backend
@@ -64,6 +64,11 @@ substitutions:
   # Not a secret — the project URL is already public in the mobile bundle.
   # Kept as a substitution so a staging project is a one-line override.
   _SUPABASE_URL: https://nxiokqrqxtjjqjiexknj.supabase.co
+  # Sender for review-outcome mail. onboarding@resend.dev is Resend's shared
+  # test sender: no domain verification, but it only delivers to the address
+  # that owns the API key. Replace with an address on a verified domain before
+  # contributors other than you are meant to receive anything.
+  _EMAIL_FROM: Australian Poisonous Plants <onboarding@resend.dev>
 
 options:
   logging: CLOUD_LOGGING_ONLY
