@@ -160,25 +160,38 @@ async def create_submission(
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ) -> ApiResponse[SubmissionOut]:
-    """Create a new observation from the mobile Upload tab.
+    """Create a new observation.
 
-    Upload one or more photos under the same `photos` field name.
-    The first photo in the list is marked as the primary image.
+    Send one or more photographs under the `photos` field; the first is the
+    primary image. Accepted types are JPEG, PNG and WebP, up to ten per
+    submission.
 
-    Anonymous submissions are still accepted, but when a bearer token is
-    present the contributor identity is taken from it and the corresponding
-    form fields are ignored. `GET /submissions/me` matches on
-    `contributor_email`, so a client-supplied address was not merely a data
-    quality problem: submitting under someone else's email placed the record
-    in that person's list.
+    Signing in is optional but recommended: with a bearer token the
+    contributor identity comes from the token and `contributor_name` /
+    `contributor_email` in the form are ignored, and the submission then
+    appears in `GET /submissions/me` and can be edited while it is pending.
 
-    Photos are stored in the `submission-images` bucket and stay there as an
-    audit trail; they are copied into `plant-images` only if a reviewer
-    approves the submission.
+    Every photograph is screened for whether it shows a plant. A submission
+    where none of them do is refused with an explanation; an uncertain one is
+    accepted and marked for the reviewer. The verdict is returned in
+    `ai_is_plant` and `ai_top_matches`, and is `null` when screening was
+    unavailable.
+
+    Photographs are kept as the record of what was submitted, and copied into
+    the plant library only if a reviewer approves.
+
+    Errors:
+
+    * `422` — unsupported file type, more than ten photographs, a file that is
+      not a readable image, one that exceeds the size limit, or nothing among
+      them that appears to be a plant.
     """
     _validate_photos(photos)
 
     if current_user is not None:
+        # `GET /submissions/me` matches on contributor_email, so trusting a
+        # client-supplied address was not merely a data quality problem:
+        # submitting under someone else's email put the record in their list.
         contributor_email = current_user.email
         contributor_name = current_user.full_name or current_user.email.split("@")[0]
 
@@ -382,25 +395,32 @@ async def update_submission_status(
 ) -> ApiResponse[SubmissionReviewResult]:
     """Admin: approve or reject a submission.
 
-    Approving publishes the observation: it creates a `plants` row from the
-    reviewer's identification and copies the photos into `plant-images`. The
-    originals stay in `submission-images` as the record of what was reviewed.
+    Approving publishes the observation. It creates a plant entry from the
+    identification supplied here and copies the photos into the plant library;
+    the originals stay where they are as the record of what was reviewed.
+    Rejecting records the decision and changes nothing else. Either way the
+    contributor is emailed the outcome, and the submission becomes read-only.
 
-    All three steps share one transaction. A storage failure while copying
-    aborts the approval rather than leaving a published plant with no
-    photographs.
+    **`expected_version`** is the `content_version` of the submission you are
+    looking at, from `GET /submissions/{id}`. A contributor may keep editing
+    while a submission is pending, so if the description, the location or the
+    photographs have changed since you loaded it the review is refused rather
+    than applied — reload, see what changed, and decide again.
 
-    The contributor is emailed afterwards, as a background task, and the
-    session is committed explicitly first.
+    **Approving** requires `plant` with at least `botanical_name`. Everything
+    else about the plant is optional: the response returns `warnings` listing
+    what the published entry does not say, rather than blocking on it. Fields
+    you omit are left unset rather than blanked.
 
-    That explicit commit is not redundant. Background tasks run *before*
-    `get_db` reaches its own commit — measured, on FastAPI 0.141 and Starlette
-    1.6, against a real server as well as the test transport. Scheduling the
-    message without committing first would leave a window where the mail goes
-    out and the transaction then fails, telling a contributor their submission
-    was approved when nothing was written. Committing here closes it; the
-    commit `get_db` performs on the way out finds nothing pending and does
-    nothing.
+    **Rejecting** must not carry `plant`. `reviewer_notes` is passed on to the
+    contributor in the email, so it is the most useful thing to fill in.
+
+    Errors:
+
+    * `409` — the submission was edited after you loaded it, or another
+      reviewer decided first.
+    * `422` — approving without an identification, rejecting with one, or a
+      photograph that could not be copied into the library.
     """
     svc = SubmissionService(db)
     try:
@@ -429,9 +449,16 @@ async def update_submission_status(
     # than loading, which is what made every approval return 500 once already.
     outcome = ReviewOutcome.from_review(submission, plant)
 
-    # Commit before scheduling — see the docstring. If this raises, no message
-    # is scheduled and `get_db` rolls the review back, which is the right
-    # outcome: nothing happened, so nobody is told anything.
+    # Commit before scheduling, and not redundantly: background tasks run
+    # *before* `get_db` reaches its own commit — measured on FastAPI 0.141 and
+    # Starlette 1.6, against a real server as well as the test transport.
+    # Scheduling without committing first leaves a window where the mail goes
+    # out and the transaction then fails, telling a contributor their
+    # submission was approved when nothing was written. Committing here closes
+    # it; the commit `get_db` performs on the way out finds nothing pending.
+    #
+    # If this raises, no message is scheduled and the review rolls back, which
+    # is the right outcome: nothing happened, so nobody is told anything.
     await db.commit()
     background.add_task(notify_review, outcome)
 
