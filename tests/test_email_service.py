@@ -28,7 +28,9 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> None:
 def capture(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Intercept outgoing HTTP so no real request leaves the test."""
 
-    def _apply(status: int = 200, body: Any = None, boom: Exception | None = None) -> dict[str, Any]:
+    def _apply(
+        status: int = 200, body: Any = None, boom: Exception | None = None
+    ) -> dict[str, Any]:
         recorder: dict[str, Any] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:

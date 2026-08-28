@@ -36,6 +36,7 @@ from app.schemas.submission import (
     SubmissionCreate,
     SubmissionFilter,
     SubmissionUpdate,
+    content_fingerprint,
 )
 from app.services.storage_service import StorageService, build_object_key
 
@@ -68,6 +69,34 @@ def reset_screening_limit() -> None:
     """Drop the cached semaphore. For tests that change the setting."""
     global _screening_semaphore
     _screening_semaphore = None
+
+
+class ContentChangedError(RuntimeError):
+    """The submission changed after the reviewer loaded it."""
+
+    def __init__(self, current_version: str) -> None:
+        super().__init__(
+            "This submission has been edited since you opened it. Reload it and "
+            "check the changes before deciding."
+        )
+        self.current_version = current_version
+
+
+def submission_fingerprint(submission: Submission) -> str:
+    """The `content_version` for a loaded row.
+
+    Same function the response uses, fed from the ORM instead of the schema,
+    so the value a reviewer receives and the value checked against are
+    computed one way only.
+    """
+    return content_fingerprint(
+        contributor_name=submission.contributor_name,
+        user_description=submission.user_description,
+        location_state=submission.location_state,
+        latitude=submission.latitude,
+        longitude=submission.longitude,
+        photos=[(image.id, image.is_primary) for image in submission.images],
+    )
 
 
 class NotAPlantError(ValueError):
@@ -471,6 +500,13 @@ class SubmissionService:
         submission = await self.get_by_id(submission_id)
         if submission is None:
             return None
+
+        # Checked before the status guard so the reviewer hears the useful
+        # thing. Both are 409s, but "somebody edited this" is actionable and
+        # "somebody else already reviewed it" is not.
+        current_version = submission_fingerprint(submission)
+        if payload.expected_version != current_version:
+            raise ContentChangedError(current_version)
 
         guard = await self.db.execute(
             update(Submission)

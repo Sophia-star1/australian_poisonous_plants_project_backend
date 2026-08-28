@@ -20,6 +20,7 @@ rather than silent.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 
 import httpx
@@ -116,10 +117,10 @@ class EmailService:
             )
             return False
 
+        # Delivery was accepted either way; only the id for the log is missing
+        # if the body is not the JSON the provider documents.
         message_id = None
-        try:
+        with suppress(ValueError):
             message_id = response.json().get("id")
-        except ValueError:
-            pass
         logger.info("email_sent", to=email.to, subject=email.subject, message_id=message_id)
         return True

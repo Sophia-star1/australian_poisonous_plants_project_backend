@@ -127,8 +127,18 @@ def review(monkeypatch: pytest.MonkeyPatch) -> Any:
     app.dependency_overrides.pop(get_current_active_user, None)
 
 
+#: `update_status` is stubbed in this file, so the version is never actually
+#: compared — but the field is required by the schema, and a review body
+#: without it never reaches the endpoint at all.
+STUB_VERSION = "0123456789abcdef"
+
+
 def _approve() -> dict[str, Any]:
-    return {"status": "approved", "plant": {"botanical_name": "Abrus precatorius"}}
+    return {
+        "status": "approved",
+        "expected_version": STUB_VERSION,
+        "plant": {"botanical_name": "Abrus precatorius"},
+    }
 
 
 # ── ordering ─────────────────────────────────────────────────────────────────
@@ -192,7 +202,11 @@ async def test_a_rejection_notifies_too(async_client: AsyncClient, review: Any) 
     state = review(status="rejected", plant=None)
     response = await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json={"status": "rejected", "reviewer_notes": "Too blurred."},
+        json={
+            "status": "rejected",
+            "expected_version": STUB_VERSION,
+            "reviewer_notes": "Too blurred.",
+        },
     )
 
     assert response.status_code == 200
@@ -244,7 +258,8 @@ async def test_a_rejected_request_notifies_nobody(
     state = review(plant=_plant())
 
     response = await async_client.patch(
-        f"/api/v1/submissions/{SUBMISSION_ID}", json={"status": "approved"}
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json={"status": "approved", "expected_version": STUB_VERSION},
     )
 
     assert response.status_code == 422
@@ -282,3 +297,27 @@ async def test_an_undelivered_message_does_not_change_the_response(
     assert response.status_code == 200
     assert response.json()["data"]["plant_id"] == 42
     assert state["sent"], "it was still attempted"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_version_notifies_nobody(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """Two features that landed separately, checked where they meet.
+
+    The version guard and the notification were built on different branches
+    and git merged them without a conflict. Nothing forced them to agree: a
+    review refused for holding a stale view is a review that did not happen,
+    so the contributor must not be told a decision was made. The guard raises
+    before the endpoint reaches the notification, and this is what says so.
+    """
+    from app.services.submission_service import ContentChangedError
+
+    state = review(raises=ContentChangedError("fedcba9876543210"))
+
+    response = await async_client.patch(f"/api/v1/submissions/{SUBMISSION_ID}", json=_approve())
+
+    assert response.status_code == 409
+    assert "edited since you opened it" in response.json()["message"]
+    assert state["sent"] == []
+    assert "notify" not in state["events"]

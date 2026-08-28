@@ -55,6 +55,7 @@ from app.services.notification_service import ReviewOutcome, notify_review
 from app.services.storage_service import StorageError
 from app.services.submission_service import (
     AlreadyReviewedError,
+    ContentChangedError,
     NotAPlantError,
     SubmissionService,
 )
@@ -406,6 +407,10 @@ async def update_submission_status(
         result = await svc.update_status(
             submission_id, payload=payload, reviewed_by=str(admin.email)
         )
+    except ContentChangedError as exc:
+        # The reviewer is holding a stale view. 409 rather than 422: nothing
+        # about the request is malformed, it just no longer applies.
+        raise ConflictError(str(exc)) from exc
     except AlreadyReviewedError as exc:
         raise ConflictError(str(exc)) from exc
     except StorageError as exc:
