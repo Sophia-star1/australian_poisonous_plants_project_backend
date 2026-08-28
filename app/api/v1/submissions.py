@@ -21,7 +21,7 @@ letting it change afterwards would leave an approved record nobody approved.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +51,7 @@ from app.schemas.submission import (
     SubmissionStatus,
     SubmissionUpdate,
 )
+from app.services.notification_service import ReviewOutcome, notify_review
 from app.services.storage_service import StorageError
 from app.services.submission_service import (
     AlreadyReviewedError,
@@ -375,6 +376,7 @@ async def list_all_submissions(
 async def update_submission_status(
     submission_id: UUID,
     payload: SubmissionUpdate,
+    background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ) -> ApiResponse[SubmissionReviewResult]:
@@ -387,6 +389,18 @@ async def update_submission_status(
     All three steps share one transaction. A storage failure while copying
     aborts the approval rather than leaving a published plant with no
     photographs.
+
+    The contributor is emailed afterwards, as a background task, and the
+    session is committed explicitly first.
+
+    That explicit commit is not redundant. Background tasks run *before*
+    `get_db` reaches its own commit — measured, on FastAPI 0.141 and Starlette
+    1.6, against a real server as well as the test transport. Scheduling the
+    message without committing first would leave a window where the mail goes
+    out and the transaction then fails, telling a contributor their submission
+    was approved when nothing was written. Committing here closes it; the
+    commit `get_db` performs on the way out finds nothing pending and does
+    nothing.
     """
     svc = SubmissionService(db)
     try:
@@ -409,6 +423,18 @@ async def update_submission_status(
 
     submission, plant = result
     warnings = _identification_warnings(plant)
+
+    # Snapshot while the session is open. The task holds plain values, never
+    # the row: reading a mapped attribute on a detached instance raises rather
+    # than loading, which is what made every approval return 500 once already.
+    outcome = ReviewOutcome.from_review(submission, plant)
+
+    # Commit before scheduling — see the docstring. If this raises, no message
+    # is scheduled and `get_db` rolls the review back, which is the right
+    # outcome: nothing happened, so nobody is told anything.
+    await db.commit()
+    background.add_task(notify_review, outcome)
+
     return ApiResponse.success(
         data=SubmissionReviewResult(
             submission=SubmissionOut.model_validate(submission),
