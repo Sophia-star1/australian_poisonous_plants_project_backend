@@ -78,7 +78,23 @@ async def sign_up(
     payload: SignUpRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[TokenResponse]:
-    """Register a new account (mobile `CreateAccountScreen`)."""
+    """Register a new account.
+
+    Returns an access token, a refresh token and the new user, so a client can
+    sign the person straight in without a second call.
+
+    Passwords must be at least 8 characters and at most 72 bytes once UTF-8
+    encoded — the second limit is bcrypt's, and it bites sooner than it looks
+    for non-Latin scripts.
+
+    Errors:
+
+    * `409` — the address cannot be registered. The message is deliberately
+      vague about why, so this endpoint cannot be used to discover who has an
+      account.
+    * `422` — malformed address, or a password outside the length bounds.
+    * `429` — 5 attempts per 5 minutes, counted per client address.
+    """
     await _enforce_rate_limit(
         "signup", [f"ip:{_client_ip(request)}"], settings.SIGNUP_RATE_LIMIT
     )
@@ -92,7 +108,20 @@ async def login(
     payload: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[TokenResponse]:
-    """Authenticate user and issue access + refresh tokens."""
+    """Sign in and receive an access token, a refresh token and the user.
+
+    The access token is short-lived; use `POST /auth/refresh` to renew it
+    rather than storing credentials.
+
+    Errors:
+
+    * `401` — wrong password, unknown account, or a disabled one. All three
+      give the same message on purpose: telling them apart would let anyone
+      enumerate registered addresses.
+    * `429` — 10 attempts per 5 minutes, counted both per client address and
+      per account, so one account being attacked cannot lock out others from
+      elsewhere. A successful sign-in clears that account's counter.
+    """
     ip_key = f"ip:{_client_ip(request)}"
     account_key = f"acct:{_account_key(payload.email)}"
     await _enforce_rate_limit("login", [ip_key, account_key], settings.LOGIN_RATE_LIMIT)
@@ -111,10 +140,15 @@ async def refresh_tokens(
     payload: RefreshRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[TokenResponse]:
-    """Exchange a refresh token for a new access + refresh token pair.
+    """Exchange a refresh token for a fresh access and refresh token pair.
 
-    This is the only endpoint that accepts a refresh token; everywhere else
-    the `type` claim is enforced to be `access`.
+    The only endpoint that accepts a refresh token — presenting one as a
+    bearer token anywhere else is rejected.
+
+    Errors:
+
+    * `401` — the token is expired, malformed, was revoked by signing out, or
+      is an access token rather than a refresh token.
     """
     tokens = await AuthService(db).refresh(payload.refresh_token)
     return ApiResponse.success(data=tokens)
@@ -157,7 +191,12 @@ async def logout(
 async def get_session(
     current_user: User = Depends(get_current_active_user),
 ) -> ApiResponse[SessionResponse]:
-    """Return the user attached to the bearer token (mirrors `getSession`)."""
+    """Return the user attached to the bearer token.
+
+    Shaped to mirror a Supabase `getSession()` response, for clients migrating
+    from calling Supabase directly. `GET /auth/me` returns the same user
+    without the session wrapper.
+    """
     return ApiResponse.success(
         data=SessionResponse(user=UserOut.model_validate(current_user))
     )
@@ -167,5 +206,10 @@ async def get_session(
 async def get_me(
     current_user: User = Depends(get_current_active_user),
 ) -> ApiResponse[UserOut]:
-    """Return the current user — handy for profile loads."""
+    """Return the signed-in user.
+
+    Reads the account from storage rather than from the token, so a role or
+    status changed by an administrator is reflected at once rather than at the
+    next sign-in.
+    """
     return ApiResponse.success(data=UserOut.model_validate(current_user))

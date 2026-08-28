@@ -32,7 +32,11 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ) -> ApiResponse[PageResult[UserOut]]:
-    """Admin: list accounts and their roles."""
+    """Admin: one page of accounts and their roles.
+
+    `role` filters to an exact role. `page` starts at 1 and `page_size` is
+    capped at 100; the response carries `total` for building a pager.
+    """
     rows, total = await UserService(db).list_users(page=page, page_size=page_size, role=role)
     return ApiResponse.success(
         data=PageResult[UserOut](
@@ -50,7 +54,12 @@ async def get_user(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ) -> ApiResponse[UserOut]:
-    """Admin: fetch a single account."""
+    """Admin: one account.
+
+    Errors:
+
+    * `404` — no account with that id.
+    """
     user = await UserService(db).get_by_id(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} not found.")
@@ -66,14 +75,19 @@ async def update_user_role(
 ) -> ApiResponse[UserOut]:
     """Admin: promote or demote an account.
 
-    Two guards, both about not locking yourself out:
+    Takes effect on the target's very next request, including one made with a
+    token issued before the change — permission is read from the account, not
+    from the token.
 
-    * an admin cannot demote themselves, which is the common accident;
-    * the last remaining admin cannot be demoted by anyone, which would leave
-      the instance with no way back in short of direct database access.
+    Two things are refused, both about not locking everyone out: you cannot
+    demote yourself, and the last remaining administrator cannot be demoted by
+    anyone. Recovering from either would mean editing the database by hand.
 
-    The change takes effect on the target's next request — `get_current_user`
-    re-reads the user rather than trusting the role in their token.
+    Errors:
+
+    * `403` — demoting yourself, or demoting the last administrator.
+    * `404` — no account with that id.
+    * `422` — a role other than `user` or `admin`.
     """
     service = UserService(db)
     target = await service.get_by_id(user_id)

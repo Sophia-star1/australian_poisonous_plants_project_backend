@@ -27,9 +27,12 @@ async def list_plants(
     ),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[list[PlantSummary]]:
-    """Return every plant, ordered by botanical name.
+    """Every plant, ordered by botanical name. Public.
 
-    Drives the `PlantsScreen` browse list.
+    Returns summaries — name, family, common names and a headline toxicity —
+    not the full record. Use `GET /plants/{id}` for that.
+
+    `limit` caps the rows returned, up to 500; omit it for all of them.
     """
     rows = await PlantService(db).list_plants(limit=limit)
     return ApiResponse.success(
@@ -52,13 +55,22 @@ async def search_plants(
     ),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[list[PlantSummary]]:
-    """Ranked search across plant fields.
+    """Search plants, best matches first. Public.
 
-    Pass `field` to restrict searching to specific columns, e.g.
-    `?q=acacia&field=botanical_name,family_name`.
+    Case-insensitive substring matching across botanical and common names,
+    family, origin, lethality, toxic parts, affected animals, distribution and
+    health effects. `%` and `_` are matched literally, not as wildcards.
 
-    Empty / whitespace-only queries return `[]` so the mobile hook can
-    clear results without an extra round trip.
+    `field` narrows the search to a comma-separated subset, e.g.
+    `?q=acacia&field=botanical_name,family_name`. Valid names are
+    botanical_name, family_name, common_names, origin_status, lethality,
+    toxic_parts, toxic_to_animals, distribution_formally_listed,
+    distribution_observed and health_effects. Habitat and the free-text notes
+    are excluded — matching them returned more noise than results.
+
+    An empty or whitespace-only `q` returns `[]` rather than everything, so a
+    client clearing its search box needs no special case. `limit` caps results
+    at 100.
     """
     fields: list[str] | None = None
     if field is not None:
@@ -82,7 +94,15 @@ async def get_plant(
     plant_id: int,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[PlantDetail]:
-    """Full plant detail (with images) for `PlantDetailScreen`."""
+    """One plant in full, with its photographs. Public.
+
+    Everything the summary list omits: habitat, seasonality, the toxin
+    profile, health effects and morphology.
+
+    Errors:
+
+    * `404` — no plant with that id.
+    """
     row = await PlantService(db).get_plant(plant_id)
     if row is None:
         raise NotFoundError(f"Plant {plant_id} not found.")
