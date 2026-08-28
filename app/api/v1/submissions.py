@@ -62,9 +62,6 @@ from app.services.submission_service import (
 
 router = APIRouter()
 
-#: Cap on photos accepted in a single submission.
-MAX_PHOTOS_PER_SUBMISSION = 10
-
 
 def _identification_warnings(plant: Plant | None) -> list[str]:
     """Flag a published entry that cannot answer the question users ask.
@@ -235,7 +232,12 @@ async def list_my_submissions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> ApiResponse[PageResult[SubmissionOut]]:
-    """Return submissions whose contributor_email matches the user."""
+    """Your own submissions, newest first.
+
+    Matched on the signed-in account's address, so anything submitted
+    anonymously under that address appears here too. `page` starts at 1 and
+    `page_size` is capped at 100.
+    """
     rows, total = await SubmissionService(db).list_for_email(
         email=current_user.email, page=page, page_size=page_size
     )
@@ -255,10 +257,18 @@ async def get_submission(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> ApiResponse[SubmissionOut]:
-    """Read one submission: the contributor's own, or any for an admin.
+    """One submission — your own, or any of them for an administrator.
 
-    This is the read-only view a contributor gets once their submission has
-    been reviewed.
+    Includes `content_version`, which a reviewer must send back as
+    `expected_version` when approving or rejecting.
+
+    Works whatever the status: this is the read-only view a contributor keeps
+    once their submission has been decided.
+
+    Errors:
+
+    * `404` — no such submission, or it belongs to somebody else. Both answer
+      the same way so the endpoint cannot be used to discover which ids exist.
     """
     submission = await _load_for_user(SubmissionService(db), submission_id, current_user)
     return ApiResponse.success(data=SubmissionOut.model_validate(submission))
@@ -273,9 +283,24 @@ async def update_submission_content(
 ) -> ApiResponse[SubmissionOut]:
     """Edit your own submission while it is still awaiting review.
 
-    Distinct from `PATCH /submissions/{id}`, which is the reviewer's
-    approve/reject action — different actor, different permission, different
-    payload, so they stay separate endpoints.
+    Send only the fields you are changing: `contributor_name`,
+    `user_description`, `location_state`, `latitude`, `longitude`. Anything
+    omitted is left as it was. The status and the contributor's address are
+    not editable here.
+
+    Once reviewed a submission is frozen — the reviewer's decision refers to
+    the content they saw. The read endpoint keeps working.
+
+    Not to be confused with `PATCH /submissions/{id}`, which is the reviewer's
+    approve/reject action.
+
+    Errors:
+
+    * `403` — an administrator editing somebody else's submission.
+    * `404` — no such submission, or it is not yours. Both answer the same way
+      so the endpoint cannot be used to discover which ids exist.
+    * `409` — already approved or rejected.
+    * `422` — an unknown field in the body.
     """
     service = SubmissionService(db)
     submission = await _load_for_user(service, submission_id, current_user)
@@ -300,7 +325,20 @@ async def add_submission_photos(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> ApiResponse[SubmissionOut]:
-    """Attach more photos to your own pending submission."""
+    """Attach more photographs to your own pending submission.
+
+    Same rules as the original upload: JPEG, PNG or WebP, and ten photographs
+    per submission in total. Returns the whole submission, including a new
+    `content_version` — any review in progress against the old one will now be
+    refused, which is the point.
+
+    Errors:
+
+    * `403` — an administrator adding to somebody else's submission.
+    * `404` — no such submission, or it is not yours.
+    * `409` — already approved or rejected.
+    * `422` — unsupported type, or the total would exceed ten.
+    """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
 
@@ -332,10 +370,21 @@ async def delete_submission_photo(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> ApiResponse[SubmissionOut]:
-    """Remove one photo from your own pending submission.
+    """Remove one photograph from your own pending submission.
 
-    The last photo cannot be removed: a submission with no image is useless
-    to a reviewer, and `POST /submissions/` requires one to begin with.
+    The last one cannot be removed — a submission with no image is no use to a
+    reviewer, and creating one requires a photograph to begin with. Add the
+    replacement first.
+
+    If the removed photograph was the primary image another takes its place.
+    Returns the whole submission with a new `content_version`.
+
+    Errors:
+
+    * `403` — an administrator removing from somebody else's submission.
+    * `404` — no such submission or photograph, or it is not yours.
+    * `409` — already approved or rejected.
+    * `422` — it is the only photograph left.
     """
     service = SubmissionService(db)
     submission = await _load_for_user(service, submission_id, current_user)
@@ -366,7 +415,16 @@ async def list_all_submissions(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ) -> ApiResponse[PageResult[SubmissionOut]]:
-    """Admin: list all submissions with optional filters."""
+    """Admin: one page of submissions, newest first.
+
+    Filter by `status` (pending, approved or rejected), or by a
+    case-insensitive fragment of `contributor_name` or `contributor_email`.
+    `page` starts at 1 and `page_size` is capped at 100; the response carries
+    `total`.
+
+    Each item includes `content_version`, which is what
+    `PATCH /submissions/{id}` requires as `expected_version`.
+    """
     filters = SubmissionFilter(
         status=status,
         contributor_name=contributor_name,
