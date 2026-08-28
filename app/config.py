@@ -99,6 +99,24 @@ class Settings(BaseSettings):
     #: as browsing plants, from queueing behind an upload.
     PLANT_SCREENING_CONCURRENCY: int = 4
 
+    # --- Email (optional) ---
+    #: Resend API key. Without it the service still runs and logs what it
+    #: would have sent, so a checkout with no credentials behaves like
+    #: production minus the delivery.
+    RESEND_API_KEY: str = ""
+    #: Sender address. `onboarding@resend.dev` is Resend's shared test sender:
+    #: no domain verification needed, but it only delivers to the address that
+    #: owns the API key. Point this at a verified domain before anyone other
+    #: than you is meant to receive mail.
+    EMAIL_FROM: str = "Australian Poisonous Plants <onboarding@resend.dev>"
+    #: Where a contributor's reply should go. Empty means no Reply-To header.
+    EMAIL_REPLY_TO: str = ""
+
+    @property
+    def email_enabled(self) -> bool:
+        """Whether outgoing mail can actually be delivered."""
+        return bool(self.RESEND_API_KEY and self.EMAIL_FROM)
+
     # --- CORS ---
     ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",
