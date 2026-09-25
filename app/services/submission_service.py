@@ -351,6 +351,12 @@ class SubmissionService:
         Server-side copies, so the bytes never pass through this process. The
         originals stay in `submission-images` as the record of what the
         reviewer saw — the approval refers to those exact files.
+
+        The contributor's description becomes the caption of the **primary**
+        photo only. It describes the submission, not any one photograph, so
+        copying it onto all of them made a three-photo approval render the same
+        sentence three times under three different pictures — which reads as a
+        bug in the gallery rather than as one description.
         """
         promoted: list[PlantImage] = []
         for image in sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id))):
@@ -366,7 +372,7 @@ class SubmissionService:
                 PlantImage(
                     plant_id=plant_id,
                     image_url=stored.url or stored.key,
-                    caption=submission.user_description,
+                    caption=submission.user_description if image.is_primary else None,
                     is_primary=image.is_primary,
                 )
             )

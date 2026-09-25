@@ -317,6 +317,31 @@ async def test_promoted_images_keep_one_primary(
 
 
 @pytest.mark.asyncio
+async def test_only_the_primary_photo_gets_the_contributors_caption(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """The description belongs to the submission, not to each photograph.
+
+    Copying it onto every promoted photo made a multi-photo approval render the
+    same sentence under three different pictures, which reads as a bug in the
+    gallery rather than as one description. Uncovered until now — the caption
+    was not asserted anywhere, so changing it broke no test.
+    """
+    state = review()
+    await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification()),
+    )
+    images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
+
+    primary = [i for i in images if i.is_primary]
+    rest = [i for i in images if not i.is_primary]
+    assert len(primary) == 1
+    assert primary[0].caption is not None
+    assert all(i.caption is None for i in rest)
+
+
+@pytest.mark.asyncio
 async def test_observed_location_is_carried_into_the_plant(
     async_client: AsyncClient, review: Any
 ) -> None:
