@@ -50,23 +50,28 @@ async def search_plants(
         None,
         description="Comma-separated field names to search. Leave empty to search all fields. "
         "Valid: botanical_name, family_name, common_names, origin_status, lethality, "
-        "toxic_parts, toxic_to_animals, distribution_formally_listed, "
-        "distribution_observed, health_effects.",
+        "toxic_parts, distribution, health_effects, toxicity_by_species, toxin_profile.",
     ),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[list[PlantSummary]]:
     """Search plants, best matches first. Public.
 
     Case-insensitive substring matching across botanical and common names,
-    family, origin, lethality, toxic parts, affected animals, distribution and
-    health effects. `%` and `_` are matched literally, not as wildcards.
+    family, origin, lethality, toxic parts, distribution, health effects, the
+    toxicity profile and the toxin profile. `%` and `_` are matched literally,
+    not as wildcards.
+
+    Searching a species name — `?q=dogs` — returns the plants recorded as
+    toxic to that species, not every plant that has an entry for it. Searching
+    the toxin profile matches its values, so a chemical class or a named toxin
+    finds the plant while a key name like `primary_class` does not.
 
     `field` narrows the search to a comma-separated subset, e.g.
     `?q=acacia&field=botanical_name,family_name`. Valid names are
     botanical_name, family_name, common_names, origin_status, lethality,
-    toxic_parts, toxic_to_animals, distribution_formally_listed,
-    distribution_observed and health_effects. Habitat and the free-text notes
-    are excluded — matching them returned more noise than results.
+    toxic_parts, distribution, health_effects, toxicity_by_species and
+    toxin_profile. Habitat is excluded — matching it returned more noise than
+    results.
 
     An empty or whitespace-only `q` returns `[]` rather than everything, so a
     client clearing its search box needs no special case. `limit` caps results
@@ -96,8 +101,12 @@ async def get_plant(
 ) -> ApiResponse[PlantDetail]:
     """One plant in full, with its photographs. Public.
 
-    Everything the summary list omits: habitat, seasonality, the toxin
-    profile, health effects and morphology.
+    Everything the summary list omits: distribution, habitat, seasonality, the
+    toxin profile and morphology.
+
+    Fields absent from the data are the string `"Unknown"` rather than null —
+    that is how the dataset records a gap, so treat it as "not recorded" when
+    displaying.
 
     Errors:
 
