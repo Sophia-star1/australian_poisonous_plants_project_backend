@@ -60,10 +60,9 @@ def _plant() -> Plant:
     plant = Plant()
     plant.id = 42
     plant.botanical_name = "Abrus precatorius"
-    plant.toxic_to_humans = True
     plant.toxic_parts = ["seed"]
-    plant.health_effects = {"symptoms": ["nausea"]}
-    plant.toxic_to_animals = None
+    plant.health_effects = "Vomiting and diarrhoea."
+    plant.toxicity_by_species = {"humans": "Toxic"}
     return plant
 
 
