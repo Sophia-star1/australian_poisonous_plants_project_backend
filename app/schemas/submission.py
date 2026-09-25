@@ -148,78 +148,96 @@ class SubmissionFilter(BaseModel):
 
 
 class ToxinProfile(BaseModel):
-    """What the poison is and how fast it acts.
+    """What the poison is, chemically.
 
-    The keys come from the ten entries already in `plants`, every one of which
-    carries all three. They were free-form `dict` until now, which meant two
-    reviewers could describe the same thing under different names and no
-    client could rely on finding either.
+    The keys are `plants_v2`'s, and they are not v1's. v1 recorded
+    `{toxins, chemical_class, onset}`; v2 splits the chemistry into a primary
+    and a secondary class and names the compounds separately, and has nowhere
+    to put onset. A reviewer who needs to record how fast symptoms appear puts
+    it in `health_effects`, which is prose in v2.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    #: The toxic compound or compounds, e.g. "Abrin".
-    toxins: str | None = None
-    #: Chemical family, e.g. "toxalbumin / plant lectin".
-    chemical_class: str | None = None
-    #: How long before symptoms appear, e.g. "delayed 6-24 hours".
-    onset: str | None = None
+    #: Chemical family, e.g. "Lectins / Toxalbumins".
+    primary_class: str | None = None
+    #: A second family where the plant carries more than one, e.g. "Alkaloids".
+    secondary_class: str | None = None
+    #: The compounds themselves, e.g. "Abrin- plant lectin, toxalbumin".
+    toxins_implicated: str | None = None
 
 
-class HealthEffects(BaseModel):
-    """What exposure does to a person or animal.
+class ToxicityBySpecies(BaseModel):
+    """Which species this plant is toxic to.
 
-    This is the field triage actually reads, so `symptoms` is a list rather
-    than prose: it is what a symptom search has to match against.
+    Replaces v1's `toxic_to_humans` boolean plus `toxic_to_animals` list,
+    which could not express "toxic to horses, not yet established for dogs" —
+    the commonest state of this data by a wide margin.
+
+    Each species takes the literal string `"Toxic"` where toxicity is
+    established. Anything else, including the default `"Unknown"`, is read as
+    not established: the API's derived `toxic_to_humans` tests for `"Toxic"`
+    exactly. `extra="forbid"` because a typo'd species key would silently
+    record a finding under a name nothing reads.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    #: Individual symptoms, e.g. ["vomiting", "diarrhoea", "abdominal pain"].
-    symptoms: list[str] | None = None
-    #: The clinical pattern, e.g. "gastrointestinal and systemic toxicity".
-    toxidrome: str | None = None
-    #: Systems affected, e.g. ["gastrointestinal", "hepatic"].
-    target_organs: list[str] | None = None
+    humans: str | None = None
+    cattle: str | None = None
+    horses: str | None = None
+    sheep: str | None = None
+    goats: str | None = None
+    pigs: str | None = None
+    poultry: str | None = None
+    dogs: str | None = None
+    cats: str | None = None
+    #: Any species the named keys do not cover.
+    other: str | None = None
+    #: Free text qualifying the above, e.g. which part or what dose.
+    notes: str | None = None
 
 
 class MorphologicalAttributes(BaseModel):
     """How to recognise the plant.
 
-    Unlike the other two this one stays open. The named keys are what the
-    existing entries use — `growth_habit`, `life_history` and `flower` appear
-    in all ten, the rest in some — but describing a plant is not a closed set,
-    and a reviewer who needs to record a bulb or a rhizome should not have to
-    wait for a schema change. Extra keys are kept as given.
+    v2's keys, which are more measurable than v1's prose descriptions of leaf
+    and flower: a height in metres, a growth form, a fruit colour, the months
+    it flowers. Left open — describing a plant is not a closed set, and a
+    reviewer who needs to record a bulb or a rhizome should not wait for a
+    schema change. Extra keys are kept as given.
     """
 
     model_config = ConfigDict(extra="allow")
 
-    #: Present in every existing entry.
-    growth_habit: str | None = None
+    #: Mature height in metres. A number in the curated data, e.g. 1.5.
+    height_m: float | str | None = None
+    #: e.g. "herb subshrub", "climber_herbaceous", "tree".
+    growth_form: str | None = None
+    #: e.g. "woody", "herbaceous".
+    woodiness: str | None = None
+    #: e.g. "annual", "perennial".
     life_history: str | None = None
-    flower: str | None = None
-    #: Present in some.
-    leaf: str | None = None
-    fruit: str | None = None
-    sap: str | None = None
-    stem: str | None = None
-    odor: str | None = None
-    armament: str | None = None
+    #: e.g. "black", "brown".
+    fruit_colour: str | None = None
+    #: Three-letter month abbreviations, e.g. ["Feb", "Mar", "Apr"].
+    flowering_time: list[str] | None = None
 
 
 class PlantIdentification(BaseModel):
     """The botanical record a reviewer supplies when approving a submission.
 
     A submission carries a photo, a description and a location — none of the
-    fields `plants` needs. `botanical_name` is the only NOT NULL column and
-    has no counterpart in `submissions`, so approval cannot be a mechanical
-    copy: the identification and the toxicity profile come from the reviewer.
+    fields `plants_v2` needs. `botanical_name` has no counterpart in
+    `submissions`, so approval cannot be a mechanical copy: the identification
+    and the toxicity profile come from the reviewer.
 
-    Only `botanical_name` is required. The toxicity fields are optional so a
-    reviewer is not blocked mid-review, but leaving them empty publishes an
-    entry that answers "is this poisonous?" with silence — see the warning
-    returned by the approval endpoint.
+    Only `botanical_name` is required. Every other column in `plants_v2` is
+    NOT NULL, but the dataset's convention for a gap is the string
+    `"Unknown"`, so `SubmissionService._create_plant` fills that in for
+    whatever is left blank rather than refusing the approval. Leaving the
+    toxicity fields empty publishes an entry that answers "is this poisonous?"
+    with `"Unknown"` — see the warning returned by the approval endpoint.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -228,29 +246,28 @@ class PlantIdentification(BaseModel):
     family_name: str | None = None
     common_names: list[str] | None = None
     origin_status: str | None = None
-    distribution_formally_listed: list[str] | None = None
-    distribution_observed: list[str] | None = None
+    #: v1's `distribution_formally_listed` and `distribution_observed` merged.
+    distribution: list[str] | None = None
     habitat: str | None = None
     seasonality_of_toxicity: str | None = None
     toxic_parts: list[str] | None = None
-    toxic_to_humans: bool | None = None
-    toxic_to_animals: list[str] | None = None
+    toxicity_by_species: ToxicityBySpecies | None = None
     lethality: str | None = None
     toxin_profile: ToxinProfile | None = None
-    health_effects: HealthEffects | None = None
+    #: Prose in v2, not the structured object v1 used.
+    health_effects: str | None = None
     morphological_attributes: MorphologicalAttributes | None = None
-    historical_case_records: str | None = None
 
     @model_validator(mode="after")
     def _drop_empty_structures(self) -> "PlantIdentification":
         """Treat a nested object with nothing in it as absent.
 
         `{"toxin_profile": {}}` and omitting the field mean the same thing to
-        a reviewer, but storing `{}` would make `health_effects` truthy and
-        silence the warning that says nothing is recorded — the entry would
-        look answered while saying nothing.
+        a reviewer, but storing `{}` would make the field truthy and silence
+        the warning that says nothing is recorded — the entry would look
+        answered while saying nothing.
         """
-        for name in ("toxin_profile", "health_effects", "morphological_attributes"):
+        for name in ("toxin_profile", "toxicity_by_species", "morphological_attributes"):
             value = getattr(self, name)
             if value is not None and not value.model_dump(exclude_none=True):
                 setattr(self, name, None)
@@ -261,7 +278,7 @@ class SubmissionUpdate(BaseModel):
     """Admin action: approve or reject a submission.
 
     Approving requires `plant`: the reviewer's identification, which becomes a
-    new row in `plants` with the submission's photos copied across.
+    new row in `plants_v2` with the submission's photos copied across.
     """
 
     model_config = ConfigDict(extra="forbid")

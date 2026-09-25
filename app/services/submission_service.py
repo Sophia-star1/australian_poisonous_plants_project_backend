@@ -27,7 +27,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.ml.classifier import Decision, Verdict, get_classifier
-from app.models.plant import Plant, PlantImage
+from app.models.plant import TOXICITY_SPECIES, UNKNOWN, Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import (
     PENDING_STATUS,
@@ -97,6 +97,45 @@ def submission_fingerprint(submission: Submission) -> str:
         longitude=submission.longitude,
         photos=[(image.id, image.is_primary) for image in submission.images],
     )
+
+
+def _unknown_defaults() -> dict[str, Any]:
+    """Every NOT NULL `plants_v2` column, set to the dataset's "no value".
+
+    `plants_v2` has no nullable columns and records a gap as the string
+    `'Unknown'` — as `['Unknown']` for a text array, and as an object of
+    `'Unknown'` for the two jsonb columns. `botanical_name` is absent on
+    purpose: a reviewer must supply it, and defaulting it to `'Unknown'` would
+    publish an unnamed plant rather than fail.
+
+    Built fresh on each call because the nested structures are mutable; a
+    module-level constant would be shared between every approved plant.
+    """
+    return {
+        "family_name": UNKNOWN,
+        "common_names": [UNKNOWN],
+        "origin_status": UNKNOWN,
+        "distribution": [UNKNOWN],
+        "habitat": UNKNOWN,
+        "seasonality_of_toxicity": UNKNOWN,
+        "toxic_parts": [UNKNOWN],
+        "lethality": UNKNOWN,
+        "health_effects": UNKNOWN,
+        "toxicity_by_species": {key: UNKNOWN for key in (*TOXICITY_SPECIES, "notes")},
+        "toxin_profile": {
+            "primary_class": UNKNOWN,
+            "secondary_class": UNKNOWN,
+            "toxins_implicated": UNKNOWN,
+        },
+        "morphological_attributes": {
+            "height_m": UNKNOWN,
+            "growth_form": UNKNOWN,
+            "woodiness": UNKNOWN,
+            "life_history": UNKNOWN,
+            "fruit_colour": UNKNOWN,
+            "flowering_time": [UNKNOWN],
+        },
+    }
 
 
 class NotAPlantError(ValueError):
@@ -336,17 +375,31 @@ class SubmissionService:
     async def _create_plant(
         self, identification: PlantIdentification, submission: Submission
     ) -> Plant:
-        """Create the `plants` row a reviewer approved into existence.
+        """Create the `plants_v2` row a reviewer approved into existence.
 
-        The observed location is folded into `distribution_observed` when the
-        reviewer did not supply one: it is the single piece of botanical
-        information a submission genuinely carries.
+        Two things this has to do beyond copying the reviewer's fields.
+
+        The observed location is folded into `distribution` when the reviewer
+        did not supply one: it is the single piece of botanical information a
+        submission genuinely carries. In v1 this went into
+        `distribution_observed`, which kept it distinguishable from a formal
+        listing; v2 has one merged list, so that distinction is lost — a
+        contributor's sighting now sits alongside curated distribution data.
+
+        Then every column left blank is filled with the dataset's `'Unknown'`
+        convention. Every column in `plants_v2` is NOT NULL, so an omitted
+        field is an IntegrityError rather than a NULL, and the reviewer is only
+        obliged to supply `botanical_name`. Filling here rather than leaning on
+        the server defaults keeps the ORM instance and the row identical: the
+        approval response and the notification email both read this object
+        back, and a column the database defaulted would be missing from it
+        until a refresh.
         """
-        fields = identification.model_dump(exclude_unset=True)
-        if not fields.get("distribution_observed") and submission.location_state:
-            fields["distribution_observed"] = [submission.location_state]
+        fields = identification.model_dump(exclude_unset=True, exclude_none=True)
+        if not fields.get("distribution") and submission.location_state:
+            fields["distribution"] = [submission.location_state]
 
-        plant = Plant(**fields)
+        plant = Plant(**{**_unknown_defaults(), **fields})
         self.db.add(plant)
         await self.db.flush()
         return plant
@@ -489,8 +542,8 @@ class SubmissionService:
         """Approve or reject a submission (admin only).
 
         Approving is a single transaction across three things: the submission
-        is marked reviewed, a `plants` row is created from the reviewer's
-        identification, and the photos are copied into `plant-images`. If the
+        is marked reviewed, a `plants_v2` row is created from the reviewer's
+        identification, and the photos are copied into `plant-images-v2`. If the
         copy fails the whole request fails and nothing is committed, so an
         approved plant never ends up without its photographs.
 

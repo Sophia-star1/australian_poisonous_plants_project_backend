@@ -281,9 +281,9 @@ async def test_approval_creates_a_plant_and_promotes_photos(
         json=_review(
             state,
             plant=_identification(
-                toxic_to_humans=True,
+                toxicity_by_species={"humans": "Toxic"},
                 toxic_parts=["Leaves", "Seeds"],
-                health_effects={"symptoms": ["nausea"]},
+                health_effects="Vomiting, diarrhoea, abdominal pain.",
             ),
         ),
     )
@@ -298,7 +298,7 @@ async def test_approval_creates_a_plant_and_promotes_photos(
     assert len(state["copies"]) == 2
     for copy in state["copies"]:
         assert copy["source"].startswith("submission-images/")
-        assert copy["destination"].startswith("plant-images/plants/42/")
+        assert copy["destination"].startswith("plant-images-v2/plants/42/")
 
 
 @pytest.mark.asyncio
@@ -320,14 +320,19 @@ async def test_promoted_images_keep_one_primary(
 async def test_observed_location_is_carried_into_the_plant(
     async_client: AsyncClient, review: Any
 ) -> None:
-    """The one botanical fact a submission genuinely carries."""
+    """The one botanical fact a submission genuinely carries.
+
+    v1 put this in `distribution_observed`, which kept it distinguishable from
+    a formal listing. v2 has one merged `distribution`, so a contributor's
+    sighting now sits alongside curated distribution data.
+    """
     state = review()
     await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
         json=_review(state, plant=_identification()),
     )
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
-    assert plant.distribution_observed == ["NSW"]
+    assert plant.distribution == ["NSW"]
 
 
 @pytest.mark.asyncio
@@ -338,10 +343,10 @@ async def test_reviewer_supplied_distribution_wins(
     state = review()
     await async_client.patch(
         f"/api/v1/submissions/{SUBMISSION_ID}",
-        json=_review(state, plant=_identification(distribution_observed=["QLD", "NT"])),
+        json=_review(state, plant=_identification(distribution=["QLD", "NT"])),
     )
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
-    assert plant.distribution_observed == ["QLD", "NT"]
+    assert plant.distribution == ["QLD", "NT"]
 
 
 @pytest.mark.asyncio
@@ -370,9 +375,9 @@ async def test_complete_identification_produces_no_warnings(
         json=_review(
             state,
             plant=_identification(
-                toxic_to_humans=True,
+                toxicity_by_species={"humans": "Toxic"},
                 toxic_parts=["Leaves"],
-                health_effects={"symptoms": ["nausea"]},
+                health_effects="Vomiting, diarrhoea, abdominal pain.",
             ),
         ),
     )
