@@ -1,28 +1,100 @@
 """JWT token management and password hashing utilities."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from uuid import uuid4
+
+import bcrypt
+from jose import JWTError, jwt
+
+from app.config import settings
+
+#: Value of the `type` claim on short-lived tokens used to call the API.
+ACCESS_TOKEN_TYPE = "access"
+#: Value of the `type` claim on long-lived tokens, only valid at /auth/refresh.
+REFRESH_TOKEN_TYPE = "refresh"
 
 
-def create_access_token(data: dict[str, str | datetime], expires_delta: int | None = None) -> str:
+def _now() -> datetime:
+    """Return an aware UTC `datetime` (separate helper for easier mocking)."""
+    return datetime.now(timezone.utc)
+
+
+def _build_token(
+    data: dict[str, Any], expires_delta: timedelta, token_type: str
+) -> str:
+    """Encode the given claims into a signed JWT.
+
+    Every token gets a unique `jti` so it can be revoked individually; see
+    `core.token_denylist`. Without it, logout has nothing to key on.
+    """
+    to_encode: dict[str, Any] = {**data}
+    expire = _now() + expires_delta
+    to_encode.update(
+        {"exp": expire, "iat": _now(), "type": token_type, "jti": str(uuid4())}
+    )
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_access_token(
+    data: dict[str, Any], expires_delta: int | None = None
+) -> str:
     """Generate a signed JWT access token."""
-    ...
+    delta = timedelta(minutes=expires_delta or settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    return _build_token(data, delta, token_type=ACCESS_TOKEN_TYPE)
 
 
-def create_refresh_token(data: dict[str, str | datetime], expires_delta: int | None = None) -> str:
+def create_refresh_token(
+    data: dict[str, Any], expires_delta: int | None = None
+) -> str:
     """Generate a signed JWT refresh token."""
-    ...
+    delta = timedelta(days=expires_delta or settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    return _build_token(data, delta, token_type=REFRESH_TOKEN_TYPE)
 
 
-def verify_token(token: str) -> dict[str, object] | None:
-    """Decode and validate a JWT token, returning claims or None."""
-    ...
+def verify_token(token: str, expected_type: str = ACCESS_TOKEN_TYPE) -> dict[str, Any] | None:
+    """Decode and validate a JWT, returning its claims or `None`.
+
+    The `type` claim is enforced: an access token cannot be used where a
+    refresh token is expected, and — more importantly — a long-lived refresh
+    token cannot be presented as an access token to reach protected endpoints.
+    """
+    try:
+        claims: dict[str, Any] = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+    except JWTError:
+        return None
+
+    if claims.get("type") != expected_type:
+        return None
+    return claims
+
+
+#: bcrypt hashes at most 72 bytes of input and raises beyond that. Anything
+#: longer must be rejected at the edge, not at the hashing call.
+BCRYPT_MAX_PASSWORD_BYTES = 72
 
 
 def get_password_hash(password: str) -> str:
-    """Hash a plaintext password using bcrypt."""
-    ...
+    """Hash a plaintext password using bcrypt.
+
+    Raises:
+        ValueError: if the password exceeds bcrypt's 72-byte input limit.
+            Callers should validate before reaching this point; the guard is
+            here so the failure is explicit rather than a library traceback.
+    """
+    encoded = password.encode()
+    if len(encoded) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password must be at most {BCRYPT_MAX_PASSWORD_BYTES} bytes when UTF-8 encoded."
+        )
+    return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plaintext password against its bcrypt hash."""
-    ...
+    try:
+        return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+    except Exception:
+        return False

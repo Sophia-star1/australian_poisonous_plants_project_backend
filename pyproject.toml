@@ -13,12 +13,20 @@ dependencies = [
     "asyncpg",
     "alembic",
     "python-jose[cryptography]",
-    "passlib[bcrypt]",
+    "bcrypt",
     "aioboto3",
     "redis[hiredis]>=5.0",
     "structlog",
     "python-multipart",
     "httpx",
+    # Plant screening. ONNX Runtime rather than torch: the exported graph is
+    # numerically identical (1.4e-06 over random inputs) at 97 MB installed
+    # instead of 726 MB, and 110 MB resident instead of 426 MB. Cloud Run has
+    # a hard memory cap, so that gap decides whether the service starts.
+    "onnxruntime>=1.17",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +60,22 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# B008 warns about function calls in argument defaults, which is precisely how
+# FastAPI declares dependencies and parameter metadata. Not a mutable-default
+# hazard here: these markers are evaluated once and never mutated.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.mypy]
 strict = true
 python_version = "3.12"
@@ -69,3 +93,9 @@ packages = ["app"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[[tool.mypy.overrides]]
+# onnxruntime ships no py.typed marker and no stubs on PyPI. Without this the
+# import alone is an error, which buries the errors that matter.
+module = ["onnxruntime.*"]
+ignore_missing_imports = true

@@ -1,0 +1,9 @@
+# Model weights go in this directory.
+#
+# Kept under app/ so the runtime image picks them up: the Dockerfile's final
+# stage copies app/, alembic/ and alembic.ini and nothing else, so a folder at
+# the repository root would never reach the deployed container.
+#
+# Before committing anything large, see ../README.md — files over ~50 MB need
+# Git LFS or a download-at-startup approach rather than going straight into
+# the repository.

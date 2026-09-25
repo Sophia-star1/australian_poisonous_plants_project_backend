@@ -2,13 +2,16 @@
 
 from pydantic import BaseModel, EmailStr
 
+from app.schemas.role import DEFAULT_ROLE, UserRole
+
 
 class UserCreate(BaseModel):
     """Schema for creating a new user."""
 
     email: EmailStr
     password: str
-    role: str = "user"
+    full_name: str | None = None
+    role: UserRole = DEFAULT_ROLE
 
 
 class UserUpdate(BaseModel):
@@ -16,8 +19,15 @@ class UserUpdate(BaseModel):
 
     email: EmailStr | None = None
     password: str | None = None
+    full_name: str | None = None
     is_active: bool | None = None
-    role: str | None = None
+    role: UserRole | None = None
+
+
+class UserRoleUpdate(BaseModel):
+    """Admin action: change a single user's role."""
+
+    role: UserRole
 
 
 class UserOut(BaseModel):
@@ -25,6 +35,7 @@ class UserOut(BaseModel):
 
     id: int
     email: str
+    full_name: str | None = None
     is_active: bool
     role: str
 

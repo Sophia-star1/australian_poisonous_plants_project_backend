@@ -11,7 +11,7 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    """Mixin that adds created_at and updated_at columns."""
+    """Adds `created_at` and `updated_at` columns."""
 
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(),
@@ -20,5 +20,14 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(),
         onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class CreatedAtMixin:
+    """Adds only `created_at` — for tables that don't track updates."""
+
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(),
         nullable=False,
     )
