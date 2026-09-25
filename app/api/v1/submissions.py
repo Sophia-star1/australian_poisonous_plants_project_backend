@@ -35,7 +35,7 @@ from app.core.exceptions import (
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
 from app.ml.classifier import UndecodableImageError
-from app.models.plant import Plant
+from app.models.plant import Plant, not_recorded
 from app.models.submission import Submission
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
@@ -71,19 +71,24 @@ def _identification_warnings(plant: Plant | None) -> list[str]:
     triage, and an entry that says nothing about toxicity reads as "not
     dangerous" to someone in a hurry. Saying so in the response is cheaper
     than discovering it in a clinical setting.
+
+    Each check goes through `not_recorded` rather than testing for falsiness.
+    In `plants_v2` a gap is the string `'Unknown'`, never NULL or an empty
+    list, so `if not plant.health_effects` is False for every unrecorded entry
+    and these warnings would never fire again.
     """
     if plant is None:
         return []
 
     warnings: list[str] = []
-    if plant.toxic_to_humans is None and not plant.toxic_to_animals:
+    if not_recorded(plant.toxicity_by_species):
         warnings.append(
             "No toxicity recorded: the entry does not state whether the plant is "
             "harmful to humans or animals."
         )
-    if not plant.health_effects:
+    if not_recorded(plant.health_effects):
         warnings.append("No health effects recorded: symptom search will not find this plant.")
-    if not plant.toxic_parts:
+    if not_recorded(plant.toxic_parts):
         warnings.append("No toxic parts recorded.")
     return warnings
 

@@ -71,7 +71,10 @@ class Settings(BaseSettings):
     #: Where contributor photos land while a submission awaits review.
     SUPABASE_SUBMISSION_BUCKET: str = "submission-images"
     #: Where approved photos are promoted to, alongside the curated library.
-    SUPABASE_PLANT_BUCKET: str = "plant-images"
+    #: `plant-images-v2` to match `plant_images_v2`: the curated v2 rows all
+    #: point at that bucket, and promoted photos belong next to the library
+    #: they are joined to, not in the v1 bucket the app no longer reads.
+    SUPABASE_PLANT_BUCKET: str = "plant-images-v2"
     #: Rejected uploads, per policy: keep the originals as an audit trail.
     MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     ALLOWED_IMAGE_TYPES: list[str] = ["image/jpeg", "image/png", "image/webp"]

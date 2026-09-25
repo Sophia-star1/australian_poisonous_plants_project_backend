@@ -67,6 +67,29 @@ TOXICITY_SPECIES: tuple[str, ...] = (
 TOXIC = "Toxic"
 
 
+def not_recorded(value: object) -> bool:
+    """Whether a `plants_v2` value means "nothing was recorded here".
+
+    Needed because v2 never stores NULL or an empty list: a gap is the string
+    `'Unknown'`, `['Unknown']`, or a jsonb object whose every value is
+    `'Unknown'`. So the ordinary emptiness test is not just imprecise here, it
+    is inverted — `if not plant.health_effects` is False for every one of the
+    89 rows that record nothing, because `'Unknown'` is a truthy string.
+
+    Anything that carries at least one real value is considered recorded, so a
+    profile naming only the humans column still counts.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip() or value.strip() == UNKNOWN
+    if isinstance(value, dict):
+        return all(not_recorded(v) for v in value.values()) if value else True
+    if isinstance(value, (list, tuple)):
+        return all(not_recorded(v) for v in value) if value else True
+    return False
+
+
 class Plant(Base, CreatedAtMixin):
     """A poisonous plant entry."""
 
