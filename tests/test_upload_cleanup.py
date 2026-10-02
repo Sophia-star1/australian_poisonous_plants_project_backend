@@ -89,12 +89,8 @@ def world(monkeypatch: pytest.MonkeyPatch) -> Any:
         state["deleted"].append(f"{bucket}/{key}")
         return True
 
-    monkeypatch.setattr(
-        "app.services.submission_service.StorageService.upload_file", _upload_file
-    )
-    monkeypatch.setattr(
-        "app.services.submission_service.StorageService.delete_file", _delete_file
-    )
+    monkeypatch.setattr("app.services.submission_service.StorageService.upload_file", _upload_file)
+    monkeypatch.setattr("app.services.submission_service.StorageService.delete_file", _delete_file)
 
     async def _fake_db() -> AsyncIterator[FakeSession]:
         yield state["session"]
@@ -264,4 +260,3 @@ async def test_add_photos_removes_its_uploads_when_one_fails(world: Any) -> None
         await service.add_photos(SUBMISSION_ID, [_Upload(), _Upload()])  # type: ignore[list-item]
     assert len(world["uploaded"]) == 1
     assert world["deleted"] == world["uploaded"]
-

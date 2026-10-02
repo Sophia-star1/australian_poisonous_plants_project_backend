@@ -90,9 +90,7 @@ class RedisDenylist:
         `SET NX` is a single atomic command, so across every instance exactly
         one caller sees True for a given token.
         """
-        created = await self._redis.set(
-            f"{_KEY_PREFIX}{jti}", "1", ex=max(ttl_seconds, 1), nx=True
-        )
+        created = await self._redis.set(f"{_KEY_PREFIX}{jti}", "1", ex=max(ttl_seconds, 1), nx=True)
         return bool(created)
 
 
