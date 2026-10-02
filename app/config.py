@@ -102,6 +102,35 @@ class Settings(BaseSettings):
     #: as browsing plants, from queueing behind an upload.
     PLANT_SCREENING_CONCURRENCY: int = 4
 
+    # --- Badges ---
+    #: Approved submissions needed to reach each growth stage of a
+    #: contributor's tree, lowest first. Stage 0 is the bare ground before the
+    #: first approval; reaching the last entry is the full-grown tree. The
+    #: frontend draws one picture per stage, so the length of this list is the
+    #: number of pictures it needs. Override as JSON, e.g. `[1,3,5,10,20]`.
+    CONTRIBUTOR_TREE_STAGES: list[int] = [1, 3, 5, 10, 20]
+    #: Decided submissions (approved or rejected) needed for each reviewer
+    #: badge, lowest first; badge N is earned at the Nth threshold.
+    #: **Placeholders** — the real tiers have not been decided yet. Change them
+    #: here or through the environment; nothing is stored per user, so every
+    #: account is re-graded against the new list at once.
+    REVIEWER_BADGE_TIERS: list[int] = [10, 50, 100, 250]
+
+    @field_validator("CONTRIBUTOR_TREE_STAGES", "REVIEWER_BADGE_TIERS")
+    @classmethod
+    def _strictly_increasing_counts(cls, value: list[int]) -> list[int]:
+        """Refuse a ladder that cannot be climbed in order.
+
+        A repeated or decreasing threshold would make two levels share a
+        count or make a later one easier than an earlier one; failing at
+        startup is better than serving badges in an order that makes no sense.
+        """
+        if not value:
+            raise ValueError("needs at least one threshold")
+        if value[0] < 1 or any(b <= a for a, b in zip(value, value[1:], strict=False)):
+            raise ValueError(f"thresholds must be positive and strictly increasing, got {value}")
+        return value
+
     # --- Email (optional) ---
     #: Resend API key. Without it the service still runs and logs what it
     #: would have sent, so a checkout with no credentials behaves like
