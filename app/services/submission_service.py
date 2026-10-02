@@ -178,6 +178,10 @@ class SubmissionService:
     def __init__(self, db: AsyncSession, storage: StorageService | None = None) -> None:
         self.db = db
         self.storage = storage or StorageService()
+        #: Keys copied into the plant bucket by the approval in progress. A
+        #: rollback undoes the rows but not the objects, so these are what
+        #: `discard_promoted_photos` deletes when the approval does not land.
+        self._promoted_keys: list[str] = []
 
     async def screen(self, photos: list[UploadFile]) -> Screening | None:
         """Score every photo before a single byte reaches storage.
@@ -351,9 +355,28 @@ class SubmissionService:
         Server-side copies, so the bytes never pass through this process. The
         originals stay in `submission-images` as the record of what the
         reviewer saw — the approval refers to those exact files.
+
+        The contributor's description becomes the caption of the **primary**
+        photo only. It describes the submission, not any one photograph, so
+        copying it onto all of them made a three-photo approval render the same
+        sentence three times under three different pictures — which reads as a
+        bug in the gallery rather than as one description.
+
+        Exactly one promoted photo is primary, whatever the submission says.
+        `submission_images` has no constraint to that effect, and two
+        concurrent `add_photos` calls on a submission whose photos were all
+        deleted each mark their upload primary. Carrying two flags across used
+        to be merely ambiguous; since `plant_images_v2_one_primary_per_plant`
+        it is an IntegrityError, so the approval would fail with a 500 after
+        the copies had already been made. A submission with no primary would
+        instead publish a plant with no cover. Re-deriving the flag from the
+        primary-first order makes both cases come out the same as the normal
+        one.
         """
         promoted: list[PlantImage] = []
-        for image in sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id))):
+        ordered = sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id)))
+        for position, image in enumerate(ordered):
+            is_primary = position == 0
             source_key = self.storage.key_from_url(image.image_url)
             destination_key = build_object_key(f"plants/{plant_id}", source_key)
             stored = await self.storage.copy_object(
@@ -362,15 +385,31 @@ class SubmissionService:
                 source_bucket=settings.SUPABASE_SUBMISSION_BUCKET,
                 destination_bucket=settings.SUPABASE_PLANT_BUCKET,
             )
+            self._promoted_keys.append(stored.key)
             promoted.append(
                 PlantImage(
                     plant_id=plant_id,
                     image_url=stored.url or stored.key,
-                    caption=submission.user_description,
-                    is_primary=image.is_primary,
+                    caption=submission.user_description if is_primary else None,
+                    is_primary=is_primary,
                 )
             )
         return promoted
+
+    async def discard_promoted_photos(self) -> None:
+        """Delete what an approval copied into the plant bucket, best effort.
+
+        For when the approval does not land. The transaction rollback removes
+        the `plant_images_v2` rows, but the objects they pointed at are already
+        in storage, and nothing else would ever reference or remove them — a
+        copy failing on the third of five photos leaves two orphans behind.
+
+        `delete_file` logs and returns False rather than raising, so a cleanup
+        failure never replaces the error that caused it.
+        """
+        keys, self._promoted_keys = self._promoted_keys, []
+        for key in keys:
+            await self.storage.delete_file(key, bucket=settings.SUPABASE_PLANT_BUCKET)
 
     async def _create_plant(
         self, identification: PlantIdentification, submission: Submission
@@ -394,15 +433,27 @@ class SubmissionService:
         approval response and the notification email both read this object
         back, and a column the database defaulted would be missing from it
         until a refresh.
+
+        The three jsonb objects are filled key by key, not replaced whole. A
+        reviewer who records only `{"humans": "Toxic"}` would otherwise store a
+        one-key object beside 100 curated rows that each carry all eleven, and
+        a client listing species from the object would show one species where
+        it shows ten for everything else.
         """
         fields = identification.model_dump(exclude_unset=True, exclude_none=True)
         if not fields.get("distribution") and submission.location_state:
             fields["distribution"] = [submission.location_state]
 
-        plant = Plant(**{**_unknown_defaults(), **fields})
+        defaults = _unknown_defaults()
+        for name in ("toxicity_by_species", "toxin_profile", "morphological_attributes"):
+            if name in fields:
+                fields[name] = {**defaults[name], **fields[name]}
+
+        plant = Plant(**{**defaults, **fields})
         self.db.add(plant)
         await self.db.flush()
         return plant
+
     async def update_content(
         self, submission_id: UUID, payload: SubmissionContentUpdate
     ) -> Submission | None:
@@ -576,21 +627,29 @@ class SubmissionService:
             raise AlreadyReviewedError(submission.status)
 
         plant_id: int | None = None
-        if payload.status == "approved" and payload.plant is not None:
-            plant = await self._create_plant(payload.plant, submission)
-            plant_id = plant.id
-            for image in await self._promote_photos(submission, plant_id):
-                self.db.add(image)
-            await self.db.flush()
+        try:
+            if payload.status == "approved" and payload.plant is not None:
+                plant = await self._create_plant(payload.plant, submission)
+                plant_id = plant.id
+                for image in await self._promote_photos(submission, plant_id):
+                    self.db.add(image)
+                await self.db.flush()
 
-        await self.db.flush()
-        # expire_all() marks every loaded attribute stale, including those of
-        # the Plant just created. Handing that instance back would make the
-        # caller's first attribute access a lazy load, which under asyncio
-        # raises MissingGreenlet rather than fetching -- the endpoint reads
-        # plant.id to build its response, so approving always returned 500.
-        # Reload explicitly, inside the async context where IO is allowed.
-        self.db.expire_all()
-        refreshed = await self.get_by_id(submission_id)
-        reloaded = await self.db.get(Plant, plant_id) if plant_id is not None else None
+            await self.db.flush()
+            # expire_all() marks every loaded attribute stale, including those
+            # of the Plant just created. Handing that instance back would make
+            # the caller's first attribute access a lazy load, which under
+            # asyncio raises MissingGreenlet rather than fetching -- the
+            # endpoint reads plant.id to build its response, so approving
+            # always returned 500. Reload explicitly, inside the async context
+            # where IO is allowed.
+            self.db.expire_all()
+            refreshed = await self.get_by_id(submission_id)
+            reloaded = await self.db.get(Plant, plant_id) if plant_id is not None else None
+        except Exception:
+            # The request is about to roll back; take the copied objects with
+            # it. The caller still owns the commit, so it calls this again if
+            # that is what fails.
+            await self.discard_promoted_photos()
+            raise
         return (refreshed or submission), reloaded

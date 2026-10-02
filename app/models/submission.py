@@ -39,6 +39,18 @@ class Submission(Base):
         back_populates="submission",
         cascade="all, delete-orphan",
         lazy="selectin",
+        # Deterministic order, so a reviewer looking at the same submission
+        # twice sees the photos in the same sequence and the lead photo stays
+        # first. `selectinload` emits no ORDER BY of its own, which leaves the
+        # sequence unspecified.
+        #
+        # Note what this does *not* give: upload order. `id` here is a UUID —
+        # random, not monotonic — and `submission_images` has no `created_at`
+        # column, so the order the contributor picked their photos in is simply
+        # not recorded anywhere. Adding a `created_at` or `sort_order` column is
+        # the only way to recover it; until then "second photo" is not a thing
+        # this API can express.
+        order_by="(desc(SubmissionImage.is_primary), SubmissionImage.id)",
     )
 
 

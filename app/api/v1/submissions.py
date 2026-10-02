@@ -521,8 +521,14 @@ async def update_submission_status(
     # it; the commit `get_db` performs on the way out finds nothing pending.
     #
     # If this raises, no message is scheduled and the review rolls back, which
-    # is the right outcome: nothing happened, so nobody is told anything.
-    await db.commit()
+    # is the right outcome: nothing happened, so nobody is told anything. The
+    # photos already copied into the plant bucket do not roll back with it, so
+    # they are removed by hand.
+    try:
+        await db.commit()
+    except Exception:
+        await svc.discard_promoted_photos()
+        raise
     background.add_task(notify_review, outcome)
 
     return ApiResponse.success(

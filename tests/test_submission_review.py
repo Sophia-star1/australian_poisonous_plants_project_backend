@@ -18,7 +18,7 @@ from app.api.v1 import submissions as api
 from app.db.session import get_db
 from app.dependencies import get_current_active_user
 from app.main import app
-from app.models.plant import Plant
+from app.models.plant import Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
 from app.models.user import User
 from app.schemas.submission import PlantIdentification, SubmissionUpdate
@@ -26,6 +26,7 @@ from app.services.storage_service import StorageError, StoredFile
 from app.services.submission_service import (
     AlreadyReviewedError,
     SubmissionService,
+    _unknown_defaults,
     submission_fingerprint,
 )
 
@@ -52,18 +53,21 @@ def _submission(status: str = "pending", images: int = 2) -> Submission:
     sub.reviewed_by = None
     sub.reviewed_at = None
     sub.submitted_at = datetime.now(UTC)
-    sub.images = []
-    for i in range(images):
-        image = SubmissionImage()
-        image.id = uuid4()
-        image.submission_id = SUBMISSION_ID
-        image.image_url = (
-            f"https://proj.supabase.co/storage/v1/object/public/"
-            f"submission-images/submissions/{SUBMISSION_ID}/photo{i}.jpg"
-        )
-        image.is_primary = i == 0
-        sub.images.append(image)
+    sub.images = [_photo(i, i == 0) for i in range(images)]
     return sub
+
+
+def _photo(index: int, is_primary: bool) -> SubmissionImage:
+    """One already-uploaded submission photo."""
+    image = SubmissionImage()
+    image.id = uuid4()
+    image.submission_id = SUBMISSION_ID
+    image.image_url = (
+        f"https://proj.supabase.co/storage/v1/object/public/"
+        f"submission-images/submissions/{SUBMISSION_ID}/photo{index}.jpg"
+    )
+    image.is_primary = is_primary
+    return image
 
 
 def _expire(instance: Any) -> type:
@@ -110,6 +114,10 @@ class FakeSession:
         self.guard_matches = True
         self.reloaded: list[Any] = []
         self._expired: list[tuple[Any, type, Any]] = []
+        #: Raised by the first flush after a PlantImage is added — where the
+        #: one-primary index or the `(plant_id, image_url)` key would fire.
+        self.image_flush_error: Exception | None = None
+        self.commit_error: Exception | None = None
 
     async def get(self, model: type, primary_key: Any) -> Any:
         """Undo expiry for the matching instance, as a real reload would."""
@@ -136,6 +144,8 @@ class FakeSession:
         return _Result(self.guard_matches)
 
     async def flush(self) -> None:
+        if self.image_flush_error and any(isinstance(o, PlantImage) for o in self.added):
+            raise self.image_flush_error
         for obj in self.added:
             if isinstance(obj, Plant) and obj.id is None:
                 obj.id = 42
@@ -150,7 +160,8 @@ class FakeSession:
         return None
 
     async def commit(self) -> None:
-        return None
+        if self.commit_error:
+            raise self.commit_error
 
     async def rollback(self) -> None:
         return None
@@ -159,12 +170,17 @@ class FakeSession:
 @pytest.fixture
 def review(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Wire the endpoint to fakes and expose what was written."""
-    state: dict[str, Any] = {"copies": [], "session": FakeSession()}
+    state: dict[str, Any] = {"copies": [], "deletes": [], "session": FakeSession()}
 
     def _apply(
-        *, status: str = "pending", guard: bool = True, copy_fails: bool = False
+        *,
+        status: str = "pending",
+        guard: bool = True,
+        copy_fails: bool = False,
+        copy_fails_at: int | None = None,
+        images: int = 2,
     ) -> dict[str, Any]:
-        row = _submission(status=status)
+        row = _submission(status=status, images=images)
         state["submission"] = row
         state["session"].guard_matches = guard
 
@@ -178,7 +194,7 @@ def review(monkeypatch: pytest.MonkeyPatch) -> Any:
             source_bucket: str,
             destination_bucket: str,
         ) -> StoredFile:
-            if copy_fails:
+            if copy_fails or len(state["copies"]) == copy_fails_at:
                 raise StorageError("Copy failed with HTTP 404.")
             state["copies"].append(
                 {
@@ -192,9 +208,16 @@ def review(monkeypatch: pytest.MonkeyPatch) -> Any:
                 f"{destination_bucket}/{destination_key}",
             )
 
+        async def _delete_file(self: Any, key: str, bucket: str | None = None) -> bool:
+            state["deletes"].append(f"{bucket}/{key}")
+            return True
+
         monkeypatch.setattr(SubmissionService, "get_by_id", _get_by_id)
         monkeypatch.setattr(
             "app.services.submission_service.StorageService.copy_object", _copy_object
+        )
+        monkeypatch.setattr(
+            "app.services.submission_service.StorageService.delete_file", _delete_file
         )
 
         async def _fake_db() -> AsyncIterator[FakeSession]:
@@ -317,6 +340,60 @@ async def test_promoted_images_keep_one_primary(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("flags", [(True, True, False), (False, False, False)])
+async def test_promotion_yields_one_primary_whatever_the_submission_says(
+    async_client: AsyncClient, review: Any, flags: tuple[bool, ...]
+) -> None:
+    """Two primaries, or none, still publish exactly one cover.
+
+    Nothing constrains `submission_images`, and concurrent `add_photos` calls
+    on a submission with no photos left each mark theirs primary. Carried
+    across as-is, two flags violate `plant_images_v2_one_primary_per_plant`
+    and the approval dies with a 500 after the copies were made; no flag
+    publishes a plant without a cover.
+    """
+    state = review()
+    row = state["submission"]
+    row.images = [_photo(i, primary) for i, primary in enumerate(flags)]
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification()),
+    )
+    assert response.status_code == 200, response.text
+
+    images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
+    assert len(images) == len(flags)
+    assert sum(1 for i in images if i.is_primary) == 1
+    # The caption follows the photo that ends up primary, not the stale flag.
+    assert [i.caption is not None for i in images] == [i.is_primary for i in images]
+
+
+@pytest.mark.asyncio
+async def test_only_the_primary_photo_gets_the_contributors_caption(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """The description belongs to the submission, not to each photograph.
+
+    Copying it onto every promoted photo made a multi-photo approval render the
+    same sentence under three different pictures, which reads as a bug in the
+    gallery rather than as one description. Uncovered until now — the caption
+    was not asserted anywhere, so changing it broke no test.
+    """
+    state = review()
+    await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification()),
+    )
+    images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
+
+    primary = [i for i in images if i.is_primary]
+    rest = [i for i in images if not i.is_primary]
+    assert len(primary) == 1
+    assert primary[0].caption is not None
+    assert all(i.caption is None for i in rest)
+
+
+@pytest.mark.asyncio
 async def test_observed_location_is_carried_into_the_plant(
     async_client: AsyncClient, review: Any
 ) -> None:
@@ -347,6 +424,50 @@ async def test_reviewer_supplied_distribution_wins(
     )
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
     assert plant.distribution == ["QLD", "NT"]
+
+
+@pytest.mark.asyncio
+async def test_partial_objects_are_completed_with_unknown(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """A one-key object would sit beside 100 rows that carry every key.
+
+    The reviewer's values win, the rest are the dataset's 'Unknown', and an
+    extra morphology key the reviewer added is kept.
+    """
+    state = review()
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(
+            state,
+            plant=_identification(
+                toxicity_by_species={"humans": "toxic", "notes": "seeds"},
+                toxin_profile={"primary_class": "Cardiac glycosides"},
+                morphological_attributes={"height_m": 3, "rhizome": "thick"},
+            ),
+        ),
+    )
+    assert response.status_code == 200, response.text
+    plant = next(o for o in state["session"].added if isinstance(o, Plant))
+
+    species = plant.toxicity_by_species
+    assert set(species) == set(_unknown_defaults()["toxicity_by_species"])
+    assert species["humans"] == "Toxic"
+    assert species["notes"] == "seeds"
+    assert {species[k] for k in species if k not in ("humans", "notes")} == {"Unknown"}
+    assert plant.toxic_to_humans is True
+
+    assert plant.toxin_profile == {
+        "primary_class": "Cardiac glycosides",
+        "secondary_class": "Unknown",
+        "toxins_implicated": "Unknown",
+    }
+
+    morph = plant.morphological_attributes
+    assert set(_unknown_defaults()["morphological_attributes"]) <= set(morph)
+    assert morph["height_m"] == 3
+    assert morph["rhizome"] == "thick"
+    assert morph["woodiness"] == "Unknown"
 
 
 @pytest.mark.asyncio
@@ -399,6 +520,75 @@ async def test_copy_failure_aborts_the_approval(
     )
     assert response.status_code == 422
     assert "Could not copy the photos" in response.json()["message"]
+
+
+def _copied(state: dict[str, Any]) -> list[str]:
+    return [c["destination"] for c in state["copies"]]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_failing_midway_removes_the_photos_already_copied(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """The rollback takes the rows; the objects have to be taken by hand.
+
+    Third of three photos fails: the first two are in the plant bucket, and
+    with the transaction gone nothing would ever reference or delete them.
+    """
+    state = review(images=3, copy_fails_at=2)
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification()),
+    )
+    assert response.status_code == 422
+    assert len(state["copies"]) == 2
+    assert sorted(state["deletes"]) == sorted(_copied(state))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_flush_removes_the_copied_photos(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """E.g. the one-primary index or the `(plant_id, image_url)` key firing."""
+    state = review()
+    state["session"].image_flush_error = RuntimeError("duplicate key value")
+    with pytest.raises(RuntimeError, match="duplicate key"):
+        await async_client.patch(
+            f"/api/v1/submissions/{SUBMISSION_ID}",
+            json=_review(state, plant=_identification()),
+        )
+    assert len(state["copies"]) == 2
+    assert sorted(state["deletes"]) == sorted(_copied(state))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_commit_removes_the_copied_photos(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """The endpoint owns the commit, so the endpoint has to clean up after it."""
+    state = review()
+    state["session"].commit_error = RuntimeError("connection was closed")
+    with pytest.raises(RuntimeError, match="connection was closed"):
+        await async_client.patch(
+            f"/api/v1/submissions/{SUBMISSION_ID}",
+            json=_review(state, plant=_identification()),
+        )
+    assert len(state["copies"]) == 2
+    assert sorted(state["deletes"]) == sorted(_copied(state))
+
+
+@pytest.mark.asyncio
+async def test_a_successful_approval_deletes_nothing(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """The cleanup must not fire on the path where the photos are wanted."""
+    state = review()
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification()),
+    )
+    assert response.status_code == 200
+    assert state["deletes"] == []
 
 
 @pytest.mark.asyncio
