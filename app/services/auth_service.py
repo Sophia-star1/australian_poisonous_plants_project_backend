@@ -1,5 +1,6 @@
 """Authentication business logic."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, UnauthorizedError
@@ -15,6 +16,13 @@ from app.models.user import User
 from app.schemas.auth import LoginRequest, SignUpRequest, TokenResponse
 from app.schemas.user import UserCreate, UserOut
 from app.services.user_service import UserService
+
+#: The one answer signup gives for an address it cannot register, however it
+#: found out.
+_SIGNUP_CONFLICT = (
+    "Could not create the account. If you already have one, try signing in "
+    "or resetting your password."
+)
 
 
 class AuthService:
@@ -48,18 +56,22 @@ class AuthService:
             # anyone probe the API to learn which addresses hold an account.
             # The detail belongs in the email we would send to the address
             # itself, not in a response to whoever asked.
-            raise ConflictError(
-                "Could not create the account. If you already have one, try signing in "
-                "or resetting your password."
-            )
+            raise ConflictError(_SIGNUP_CONFLICT)
 
-        user = await self.users.create(
-            UserCreate(
-                email=payload.email,
-                password=payload.password,
-                full_name=payload.full_name,
+        try:
+            user = await self.users.create(
+                UserCreate(
+                    email=payload.email,
+                    password=payload.password,
+                    full_name=payload.full_name,
+                )
             )
-        )
+        except IntegrityError as exc:
+            # The lookup above and the INSERT are two statements, so two
+            # signups for one address — a double-tapped button is enough —
+            # both pass the lookup and the unique index refuses the second.
+            # That is the same outcome as the lookup finding it, not a 500.
+            raise ConflictError(_SIGNUP_CONFLICT) from exc
         return self._issue_tokens(user)
 
     async def authenticate(self, payload: LoginRequest) -> TokenResponse:

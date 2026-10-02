@@ -195,7 +195,10 @@ async def create_submission(
         # client-supplied address was not merely a data quality problem:
         # submitting under someone else's email put the record in their list.
         contributor_email = current_user.email
-        contributor_name = current_user.full_name or current_user.email.split("@")[0]
+        # Stripped first: a stored name of only spaces is truthy, and would
+        # then fail the name's length check and refuse a signed-in upload.
+        mailbox = current_user.email.split("@")[0]
+        contributor_name = (current_user.full_name or "").strip() or mailbox
 
     try:
         payload = SubmissionCreate(
