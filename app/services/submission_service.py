@@ -433,15 +433,27 @@ class SubmissionService:
         approval response and the notification email both read this object
         back, and a column the database defaulted would be missing from it
         until a refresh.
+
+        The three jsonb objects are filled key by key, not replaced whole. A
+        reviewer who records only `{"humans": "Toxic"}` would otherwise store a
+        one-key object beside 100 curated rows that each carry all eleven, and
+        a client listing species from the object would show one species where
+        it shows ten for everything else.
         """
         fields = identification.model_dump(exclude_unset=True, exclude_none=True)
         if not fields.get("distribution") and submission.location_state:
             fields["distribution"] = [submission.location_state]
 
-        plant = Plant(**{**_unknown_defaults(), **fields})
+        defaults = _unknown_defaults()
+        for name in ("toxicity_by_species", "toxin_profile", "morphological_attributes"):
+            if name in fields:
+                fields[name] = {**defaults[name], **fields[name]}
+
+        plant = Plant(**{**defaults, **fields})
         self.db.add(plant)
         await self.db.flush()
         return plant
+
     async def update_content(
         self, submission_id: UUID, payload: SubmissionContentUpdate
     ) -> Submission | None:

@@ -26,6 +26,7 @@ from app.services.storage_service import StorageError, StoredFile
 from app.services.submission_service import (
     AlreadyReviewedError,
     SubmissionService,
+    _unknown_defaults,
     submission_fingerprint,
 )
 
@@ -423,6 +424,50 @@ async def test_reviewer_supplied_distribution_wins(
     )
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
     assert plant.distribution == ["QLD", "NT"]
+
+
+@pytest.mark.asyncio
+async def test_partial_objects_are_completed_with_unknown(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """A one-key object would sit beside 100 rows that carry every key.
+
+    The reviewer's values win, the rest are the dataset's 'Unknown', and an
+    extra morphology key the reviewer added is kept.
+    """
+    state = review()
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(
+            state,
+            plant=_identification(
+                toxicity_by_species={"humans": "toxic", "notes": "seeds"},
+                toxin_profile={"primary_class": "Cardiac glycosides"},
+                morphological_attributes={"height_m": 3, "rhizome": "thick"},
+            ),
+        ),
+    )
+    assert response.status_code == 200, response.text
+    plant = next(o for o in state["session"].added if isinstance(o, Plant))
+
+    species = plant.toxicity_by_species
+    assert set(species) == set(_unknown_defaults()["toxicity_by_species"])
+    assert species["humans"] == "Toxic"
+    assert species["notes"] == "seeds"
+    assert {species[k] for k in species if k not in ("humans", "notes")} == {"Unknown"}
+    assert plant.toxic_to_humans is True
+
+    assert plant.toxin_profile == {
+        "primary_class": "Cardiac glycosides",
+        "secondary_class": "Unknown",
+        "toxins_implicated": "Unknown",
+    }
+
+    morph = plant.morphological_attributes
+    assert set(_unknown_defaults()["morphological_attributes"]) <= set(morph)
+    assert morph["height_m"] == 3
+    assert morph["rhizome"] == "thick"
+    assert morph["woodiness"] == "Unknown"
 
 
 @pytest.mark.asyncio
