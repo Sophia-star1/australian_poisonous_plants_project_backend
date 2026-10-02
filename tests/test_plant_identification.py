@@ -206,3 +206,81 @@ def test_omitted_fields_stay_omitted() -> None:
     """`exclude_unset` is what stops an approval blanking columns it never mentioned."""
     dumped = _identification(family_name="Fabaceae").model_dump(exclude_unset=True)
     assert set(dumped) == {"botanical_name", "family_name"}
+
+
+# ── blank is unanswered ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["   ", "\t\n"])
+def test_a_whitespace_botanical_name_is_refused(name: str) -> None:
+    """`min_length=1` alone let these through and published a nameless plant."""
+    with pytest.raises(ValidationError):
+        PlantIdentification(botanical_name=name)
+
+
+def test_the_botanical_name_is_trimmed() -> None:
+    """Searching and sorting treat a leading space as part of the name."""
+    assert _identification().botanical_name == "Abrus precatorius"
+    assert PlantIdentification(botanical_name="  Abrus precatorius ").botanical_name == (
+        "Abrus precatorius"
+    )
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_blank_text_answer_is_not_stored_as_blank(value: str) -> None:
+    """So `_create_plant` writes the dataset's 'Unknown' rather than `""`."""
+    identification = _identification(family_name=value, health_effects=value)
+    dumped = identification.model_dump(exclude_unset=True, exclude_none=True)
+    assert "family_name" not in dumped
+    assert "health_effects" not in dumped
+
+
+def test_blank_list_entries_are_dropped_and_the_rest_trimmed() -> None:
+    identification = _identification(common_names=["  Jequirity ", "", "   ", "Crab's eye"])
+    assert identification.common_names == ["Jequirity", "Crab's eye"]
+
+
+@pytest.mark.parametrize("value", [[], [""], ["  ", ""]])
+def test_a_list_with_nothing_in_it_is_unanswered(value: list[str]) -> None:
+    """`[]` is not the dataset's gap either; `['Unknown']` is."""
+    assert _identification(common_names=value, toxic_parts=value).toxic_parts is None
+    assert _identification(distribution=value).distribution is None
+
+
+def test_a_structure_of_blanks_is_missing() -> None:
+    """Blank nested answers collapse the same way `{}` does, so the warning fires."""
+    identification = _identification(
+        toxicity_by_species={"humans": " ", "notes": ""},
+        toxin_profile={"primary_class": ""},
+        morphological_attributes={"growth_form": "  ", "flowering_time": [""]},
+    )
+    assert identification.toxicity_by_species is None
+    assert identification.toxin_profile is None
+    assert identification.morphological_attributes is None
+
+
+# ── species findings are a closed vocabulary ─────────────────────────────────
+
+
+@pytest.mark.parametrize("typed", ["toxic", "TOXIC", " Toxic ", "tOxIc"])
+def test_the_case_of_toxic_is_forgiven(typed: str) -> None:
+    """It can only have meant one thing, and `toxic_to_humans` tests for 'Toxic'."""
+    profile = ToxicityBySpecies(humans=typed)  # type: ignore[arg-type]
+    assert profile.humans == "Toxic"
+
+
+def test_unknown_is_accepted_and_normalised() -> None:
+    assert ToxicityBySpecies(dogs="unknown").dogs == "Unknown"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("typed", ["Yes", "true", "Mildly toxic", "Non-toxic", "1"])
+def test_any_other_finding_is_refused(typed: str) -> None:
+    """Accepted as-is, these read back as *not* toxic — the opposite of intended."""
+    with pytest.raises(ValidationError, match="Toxic"):
+        ToxicityBySpecies(humans=typed)  # type: ignore[arg-type]
+
+
+def test_notes_stay_free_text() -> None:
+    """Qualifications go here, which is why the species values can be closed."""
+    profile = ToxicityBySpecies(humans="Toxic", notes="  mildly, seeds only ")
+    assert profile.notes == "mildly, seeds only"
