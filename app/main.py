@@ -22,8 +22,6 @@ from app.middleware.logging_middleware import RequestLoggingMiddleware
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
-    setup_logging()
-
     if settings.redis_enabled:
         pass  # TODO: initialize Redis connection pool
 
@@ -38,6 +36,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application instance."""
+    # First, not in `lifespan`: the CORS setup below logs at import time, and
+    # structlog caches a logger on first use, so anything that logs before
+    # this runs keeps the default console renderer for the life of the process.
+    setup_logging()
+
     application = FastAPI(
         title=settings.APP_NAME,
         debug=settings.DEBUG,
