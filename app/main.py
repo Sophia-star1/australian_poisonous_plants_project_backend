@@ -1,10 +1,12 @@
 """FastAPI application entry point."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
 from app.config import settings
@@ -14,9 +16,18 @@ from app.core.exceptions import (
     unhandled_exception_handler,
     validation_exception_handler,
 )
-from app.core.logging import setup_logging
+from app.core.logging import get_logger, setup_logging
+from app.db import session as db_session
 from app.middleware.cors_middleware import add_cors_middleware
 from app.middleware.logging_middleware import RequestLoggingMiddleware
+
+logger = get_logger(__name__)
+
+#: How long `/health/ready` waits for the database. A cold process opens its
+#: first connection here — TLS, auth and asyncpg's setup queries to the pooler
+#: in Tokyo — and that alone measured over 5 s from outside the region, so 5 s
+#: reported a healthy database as down. A hung database is still caught.
+READINESS_TIMEOUT_SECONDS = 10.0
 
 #: Values `SECRET_KEY` takes when nobody has set it: the default in
 #: `config.py`, the one in `.env.example`, and nothing at all.
@@ -91,8 +102,34 @@ def create_app() -> FastAPI:
 
     @application.get("/health")
     async def health_check() -> dict[str, str]:
-        """Return service health status."""
+        """Liveness: the process is up and serving. Touches nothing else.
+
+        Deliberately blind to the database. Wired to a liveness probe, a
+        check that failed with the database would have Cloud Run restart
+        healthy instances every time the database blipped — which fixes
+        nothing and drops every request in flight. `/health/ready` is the
+        one that looks.
+        """
         return {"status": "ok"}
+
+    @application.get("/health/ready", response_model=None)
+    async def readiness_check() -> JSONResponse | dict[str, str]:
+        """Readiness: whether requests that need the database can succeed.
+
+        `/health` answered 200 for the whole month the database was down
+        (2026-08-28 to 2026-09-25), so nothing watching it could tell. This
+        runs `SELECT 1` and answers 503 when that fails or takes longer than
+        `READINESS_TIMEOUT_SECONDS`. The cause is logged, never returned:
+        this endpoint is public.
+        """
+        try:
+            await asyncio.wait_for(db_session.ping(), timeout=READINESS_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("readiness_check_failed", error=f"{type(exc).__name__}: {exc}")
+            return JSONResponse(
+                status_code=503, content={"status": "unavailable", "database": "unreachable"}
+            )
+        return {"status": "ok", "database": "ok"}
 
     return application
 
