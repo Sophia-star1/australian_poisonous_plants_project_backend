@@ -30,9 +30,7 @@ def _images_sql(parent: type, attr: str) -> str:
     """The SQL `selectinload` will emit for a relationship, as one line."""
     rel = inspect(parent).relationships[attr]
     stmt = select(rel.mapper.class_).order_by(*rel.order_by)
-    return " ".join(
-        str(stmt.compile(dialect=postgresql.dialect())).split()
-    ).upper()
+    return " ".join(str(stmt.compile(dialect=postgresql.dialect())).split()).upper()
 
 
 # ── the ordering the gallery depends on ──────────────────────────────────────

@@ -17,6 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.models.plant import TOXICITY_SPECIES
+
 SubmissionStatus = Literal["pending", "approved", "rejected"]
 ReviewAction = Literal["approved", "rejected"]
 
@@ -246,11 +248,7 @@ class ToxicityBySpecies(BaseModel):
     #: Free text qualifying the above, e.g. which part or what dose.
     notes: str | None = None
 
-    @field_validator(
-        "humans", "cattle", "horses", "sheep", "goats", "pigs", "poultry", "dogs", "cats",
-        "other",
-        mode="before",
-    )
+    @field_validator(*TOXICITY_SPECIES, mode="before")
     @classmethod
     def _normalise_finding(cls, value: object) -> object:
         """`" toxic "` → `"Toxic"`; blank → unanswered; anything else as given."""
