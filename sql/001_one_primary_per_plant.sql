@@ -24,9 +24,10 @@
 -- primary, so there is nothing to reconcile first. Re-runnable thanks to
 -- IF NOT EXISTS.
 --
--- Run once against the project database:
---   psql "$DATABASE_URL" -f sql/001_one_primary_per_plant.sql
--- or paste it into the Supabase SQL editor.
+-- Run once against the project database, either in the Supabase SQL editor or
+-- with psql. Note `psql` does not accept the app's `DATABASE_URL` as-is: drop
+-- the `+asyncpg` from its scheme first.
+--   psql "postgresql://…" -f sql/001_one_primary_per_plant.sql
 --
 -- This file exists because the project has no migration history yet: Alembic is
 -- configured but `alembic/versions/*.py` is gitignored and the database has no
