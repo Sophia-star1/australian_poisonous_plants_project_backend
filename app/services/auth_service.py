@@ -11,7 +11,7 @@ from app.core.security import (
     verify_password,
     verify_token,
 )
-from app.core.token_denylist import get_denylist
+from app.core.token_denylist import get_denylist, seconds_until
 from app.models.user import User
 from app.schemas.auth import LoginRequest, SignUpRequest, TokenResponse
 from app.schemas.user import UserCreate, UserOut
@@ -89,13 +89,24 @@ class AuthService:
         The user is re-read from the database so that a disabled account or a
         changed role takes effect on refresh rather than persisting for the
         remaining lifetime of the refresh token.
+
+        A refresh token works once. Exchanging it revokes it, so the pair it
+        bought replaces it rather than joining it — before this, every refresh
+        token stayed usable for its full seven days however many times it had
+        been rotated, and one copied off a device kept minting access tokens
+        long after its owner had moved on to newer ones. The mobile client
+        already routes concurrent 401s through a single refresh and stores the
+        new pair, so it never presents a spent token.
         """
         claims = verify_token(refresh_token, expected_type=REFRESH_TOKEN_TYPE)
         if claims is None:
             raise UnauthorizedError("Invalid or expired refresh token.")
 
         jti = claims.get("jti")
-        if isinstance(jti, str) and await get_denylist().is_revoked(jti):
+        # Every token issued since August carries a jti, and refresh tokens
+        # last seven days, so none without one is still valid. Refusing them
+        # outright is what makes single use enforceable at all.
+        if not isinstance(jti, str) or await get_denylist().is_revoked(jti):
             raise UnauthorizedError("Invalid or expired refresh token.")
 
         sub = claims.get("sub")
@@ -111,5 +122,11 @@ class AuthService:
             raise UnauthorizedError("User no longer exists.")
         if not user.is_active:
             raise UnauthorizedError("Account is disabled.")
+
+        # Spent last, once everything else has passed, so a failed lookup does
+        # not burn a token the user could have retried with. The claim itself
+        # is atomic: of two refreshes racing with one token, exactly one wins.
+        if not await get_denylist().consume(jti, seconds_until(claims.get("exp"))):
+            raise UnauthorizedError("Invalid or expired refresh token.")
         return self._issue_tokens(user)
 

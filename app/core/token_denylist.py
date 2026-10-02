@@ -56,6 +56,17 @@ class InMemoryDenylist:
             return False
         return True
 
+    async def consume(self, jti: str, ttl_seconds: int) -> bool:
+        """Revoke `jti` and report whether this call was the one that did.
+
+        Check and set happen with no `await` between them, so on one event
+        loop two refreshes racing with the same token cannot both win.
+        """
+        if await self.is_revoked(jti):
+            return False
+        await self.revoke(jti, ttl_seconds)
+        return True
+
 
 class RedisDenylist:
     """Revocation list shared across processes; entries expire via Redis TTL."""
@@ -72,6 +83,17 @@ class RedisDenylist:
     async def is_revoked(self, jti: str) -> bool:
         """Report whether `jti` has been revoked and has not yet expired."""
         return bool(await self._redis.exists(f"{_KEY_PREFIX}{jti}"))
+
+    async def consume(self, jti: str, ttl_seconds: int) -> bool:
+        """Revoke `jti` and report whether this call was the one that did.
+
+        `SET NX` is a single atomic command, so across every instance exactly
+        one caller sees True for a given token.
+        """
+        created = await self._redis.set(
+            f"{_KEY_PREFIX}{jti}", "1", ex=max(ttl_seconds, 1), nx=True
+        )
+        return bool(created)
 
 
 @dataclass
