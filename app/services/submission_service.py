@@ -178,6 +178,10 @@ class SubmissionService:
     def __init__(self, db: AsyncSession, storage: StorageService | None = None) -> None:
         self.db = db
         self.storage = storage or StorageService()
+        #: Keys copied into the plant bucket by the approval in progress. A
+        #: rollback undoes the rows but not the objects, so these are what
+        #: `discard_promoted_photos` deletes when the approval does not land.
+        self._promoted_keys: list[str] = []
 
     async def screen(self, photos: list[UploadFile]) -> Screening | None:
         """Score every photo before a single byte reaches storage.
@@ -381,6 +385,7 @@ class SubmissionService:
                 source_bucket=settings.SUPABASE_SUBMISSION_BUCKET,
                 destination_bucket=settings.SUPABASE_PLANT_BUCKET,
             )
+            self._promoted_keys.append(stored.key)
             promoted.append(
                 PlantImage(
                     plant_id=plant_id,
@@ -390,6 +395,21 @@ class SubmissionService:
                 )
             )
         return promoted
+
+    async def discard_promoted_photos(self) -> None:
+        """Delete what an approval copied into the plant bucket, best effort.
+
+        For when the approval does not land. The transaction rollback removes
+        the `plant_images_v2` rows, but the objects they pointed at are already
+        in storage, and nothing else would ever reference or remove them — a
+        copy failing on the third of five photos leaves two orphans behind.
+
+        `delete_file` logs and returns False rather than raising, so a cleanup
+        failure never replaces the error that caused it.
+        """
+        keys, self._promoted_keys = self._promoted_keys, []
+        for key in keys:
+            await self.storage.delete_file(key, bucket=settings.SUPABASE_PLANT_BUCKET)
 
     async def _create_plant(
         self, identification: PlantIdentification, submission: Submission
@@ -595,21 +615,29 @@ class SubmissionService:
             raise AlreadyReviewedError(submission.status)
 
         plant_id: int | None = None
-        if payload.status == "approved" and payload.plant is not None:
-            plant = await self._create_plant(payload.plant, submission)
-            plant_id = plant.id
-            for image in await self._promote_photos(submission, plant_id):
-                self.db.add(image)
-            await self.db.flush()
+        try:
+            if payload.status == "approved" and payload.plant is not None:
+                plant = await self._create_plant(payload.plant, submission)
+                plant_id = plant.id
+                for image in await self._promote_photos(submission, plant_id):
+                    self.db.add(image)
+                await self.db.flush()
 
-        await self.db.flush()
-        # expire_all() marks every loaded attribute stale, including those of
-        # the Plant just created. Handing that instance back would make the
-        # caller's first attribute access a lazy load, which under asyncio
-        # raises MissingGreenlet rather than fetching -- the endpoint reads
-        # plant.id to build its response, so approving always returned 500.
-        # Reload explicitly, inside the async context where IO is allowed.
-        self.db.expire_all()
-        refreshed = await self.get_by_id(submission_id)
-        reloaded = await self.db.get(Plant, plant_id) if plant_id is not None else None
+            await self.db.flush()
+            # expire_all() marks every loaded attribute stale, including those
+            # of the Plant just created. Handing that instance back would make
+            # the caller's first attribute access a lazy load, which under
+            # asyncio raises MissingGreenlet rather than fetching -- the
+            # endpoint reads plant.id to build its response, so approving
+            # always returned 500. Reload explicitly, inside the async context
+            # where IO is allowed.
+            self.db.expire_all()
+            refreshed = await self.get_by_id(submission_id)
+            reloaded = await self.db.get(Plant, plant_id) if plant_id is not None else None
+        except Exception:
+            # The request is about to roll back; take the copied objects with
+            # it. The caller still owns the commit, so it calls this again if
+            # that is what fails.
+            await self.discard_promoted_photos()
+            raise
         return (refreshed or submission), reloaded
