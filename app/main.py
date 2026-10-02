@@ -18,10 +18,39 @@ from app.core.logging import setup_logging
 from app.middleware.cors_middleware import add_cors_middleware
 from app.middleware.logging_middleware import RequestLoggingMiddleware
 
+#: Values `SECRET_KEY` takes when nobody has set it: the default in
+#: `config.py`, the one in `.env.example`, and nothing at all.
+_PLACEHOLDER_SECRETS = frozenset({"", "change-me", "change-me-to-a-random-secret"})
+
+
+def refuse_placeholder_secret() -> None:
+    """Stop a production server from starting with a known signing key.
+
+    `SECRET_KEY` signs every JWT, and its default is in this repository. A
+    deployment that lost the secret binding would otherwise boot and accept
+    tokens anyone can mint, for any user id — an administrator's included,
+    since the role is read from that account. Refusing to start turns this
+    into a failed deploy: Cloud Run keeps serving the previous revision.
+
+    Skipped under DEBUG, so a fresh checkout still runs without a `.env`.
+    Checked at startup rather than when settings load, so importing the app —
+    as the test suite does — never depends on it.
+    """
+    if settings.DEBUG:
+        return
+    if settings.SECRET_KEY.strip() in _PLACEHOLDER_SECRETS:
+        raise RuntimeError(
+            "SECRET_KEY is unset or still a placeholder, so any token signed with "
+            "it can be forged. Set SECRET_KEY to a long random value, or DEBUG=true "
+            "for local development."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
+    refuse_placeholder_secret()
+
     if settings.redis_enabled:
         pass  # TODO: initialize Redis connection pool
 
