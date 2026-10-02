@@ -357,9 +357,22 @@ class SubmissionService:
         copying it onto all of them made a three-photo approval render the same
         sentence three times under three different pictures — which reads as a
         bug in the gallery rather than as one description.
+
+        Exactly one promoted photo is primary, whatever the submission says.
+        `submission_images` has no constraint to that effect, and two
+        concurrent `add_photos` calls on a submission whose photos were all
+        deleted each mark their upload primary. Carrying two flags across used
+        to be merely ambiguous; since `plant_images_v2_one_primary_per_plant`
+        it is an IntegrityError, so the approval would fail with a 500 after
+        the copies had already been made. A submission with no primary would
+        instead publish a plant with no cover. Re-deriving the flag from the
+        primary-first order makes both cases come out the same as the normal
+        one.
         """
         promoted: list[PlantImage] = []
-        for image in sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id))):
+        ordered = sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id)))
+        for position, image in enumerate(ordered):
+            is_primary = position == 0
             source_key = self.storage.key_from_url(image.image_url)
             destination_key = build_object_key(f"plants/{plant_id}", source_key)
             stored = await self.storage.copy_object(
@@ -372,8 +385,8 @@ class SubmissionService:
                 PlantImage(
                     plant_id=plant_id,
                     image_url=stored.url or stored.key,
-                    caption=submission.user_description if image.is_primary else None,
-                    is_primary=image.is_primary,
+                    caption=submission.user_description if is_primary else None,
+                    is_primary=is_primary,
                 )
             )
         return promoted

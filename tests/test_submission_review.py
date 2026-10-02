@@ -52,18 +52,21 @@ def _submission(status: str = "pending", images: int = 2) -> Submission:
     sub.reviewed_by = None
     sub.reviewed_at = None
     sub.submitted_at = datetime.now(UTC)
-    sub.images = []
-    for i in range(images):
-        image = SubmissionImage()
-        image.id = uuid4()
-        image.submission_id = SUBMISSION_ID
-        image.image_url = (
-            f"https://proj.supabase.co/storage/v1/object/public/"
-            f"submission-images/submissions/{SUBMISSION_ID}/photo{i}.jpg"
-        )
-        image.is_primary = i == 0
-        sub.images.append(image)
+    sub.images = [_photo(i, i == 0) for i in range(images)]
     return sub
+
+
+def _photo(index: int, is_primary: bool) -> SubmissionImage:
+    """One already-uploaded submission photo."""
+    image = SubmissionImage()
+    image.id = uuid4()
+    image.submission_id = SUBMISSION_ID
+    image.image_url = (
+        f"https://proj.supabase.co/storage/v1/object/public/"
+        f"submission-images/submissions/{SUBMISSION_ID}/photo{index}.jpg"
+    )
+    image.is_primary = is_primary
+    return image
 
 
 def _expire(instance: Any) -> type:
@@ -314,6 +317,35 @@ async def test_promoted_images_keep_one_primary(
     images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
     assert len(images) == 2
     assert sum(1 for i in images if i.is_primary) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flags", [(True, True, False), (False, False, False)])
+async def test_promotion_yields_one_primary_whatever_the_submission_says(
+    async_client: AsyncClient, review: Any, flags: tuple[bool, ...]
+) -> None:
+    """Two primaries, or none, still publish exactly one cover.
+
+    Nothing constrains `submission_images`, and concurrent `add_photos` calls
+    on a submission with no photos left each mark theirs primary. Carried
+    across as-is, two flags violate `plant_images_v2_one_primary_per_plant`
+    and the approval dies with a 500 after the copies were made; no flag
+    publishes a plant without a cover.
+    """
+    state = review()
+    row = state["submission"]
+    row.images = [_photo(i, primary) for i, primary in enumerate(flags)]
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification()),
+    )
+    assert response.status_code == 200, response.text
+
+    images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
+    assert len(images) == len(flags)
+    assert sum(1 for i in images if i.is_primary) == 1
+    # The caption follows the photo that ends up primary, not the stale flag.
+    assert [i.caption is not None for i in images] == [i.is_primary for i in images]
 
 
 @pytest.mark.asyncio
