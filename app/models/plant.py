@@ -124,6 +124,17 @@ class Plant(Base, CreatedAtMixin):
         back_populates="plant",
         cascade="all, delete-orphan",
         lazy="selectin",
+        # Without this the order is whatever Postgres feels like returning.
+        # `selectinload` emits a bare `WHERE plant_id IN (...)` with no ORDER BY,
+        # so the sequence is unspecified — it usually matches insertion order on
+        # a small table and then changes after an UPDATE or a VACUUM. For a
+        # gallery that means the carousel reshuffles between requests, and a
+        # client that renders `plant_images[0]` as the cover shows a different
+        # photo each time.
+        #
+        # Primary first so `[0]` is always the cover, then by id, which is
+        # monotonic and therefore reproduces the upload order.
+        order_by="(desc(PlantImage.is_primary), PlantImage.id)",
     )
 
     @property

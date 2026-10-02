@@ -7,7 +7,17 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
+
+from app.models.plant import TOXICITY_SPECIES
 
 SubmissionStatus = Literal["pending", "approved", "rejected"]
 ReviewAction = Literal["approved", "rejected"]
@@ -147,6 +157,36 @@ class SubmissionFilter(BaseModel):
     page_size: int = Field(20, ge=1, le=100)
 
 
+#: Config shared by everything a reviewer types. Whitespace is stripped first
+#: so that `"   "` is as empty as `""`, and both are then cleared by
+#: `_clear_blanks` — otherwise a blank answer is stored as a blank string, not
+#: as the `'Unknown'` the dataset uses, and `botanical_name="   "` passes
+#: `min_length=1` and publishes a plant with no name.
+_REVIEWER_INPUT = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+def _clear_blanks(model: BaseModel) -> None:
+    """Turn every blank answer on `model` into "not answered".
+
+    An empty string becomes None, blank entries are dropped from a list, and a
+    list left with nothing in it becomes None. `_create_plant` dumps with
+    `exclude_none`, so all three then fall through to the `'Unknown'` default
+    rather than being written as `""`, `[""]` or `[]`.
+    """
+    for name in type(model).model_fields:
+        value = getattr(model, name)
+        if isinstance(value, str) and not value.strip():
+            setattr(model, name, None)
+        elif isinstance(value, list):
+            kept = [v for v in value if not (isinstance(v, str) and not v.strip())]
+            setattr(model, name, kept or None)
+
+
+#: The two values `toxicity_by_species` holds across all 1,000 species entries
+#: in the curated data — 44 `'Toxic'`, 956 `'Unknown'`, nothing else.
+SpeciesFinding = Literal["Toxic", "Unknown"]
+
+
 class ToxinProfile(BaseModel):
     """What the poison is, chemically.
 
@@ -157,7 +197,7 @@ class ToxinProfile(BaseModel):
     it in `health_effects`, which is prose in v2.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = _REVIEWER_INPUT
 
     #: Chemical family, e.g. "Lectins / Toxalbumins".
     primary_class: str | None = None
@@ -165,6 +205,11 @@ class ToxinProfile(BaseModel):
     secondary_class: str | None = None
     #: The compounds themselves, e.g. "Abrin- plant lectin, toxalbumin".
     toxins_implicated: str | None = None
+
+    @model_validator(mode="after")
+    def _blanks_are_unanswered(self) -> "ToxinProfile":
+        _clear_blanks(self)
+        return self
 
 
 class ToxicityBySpecies(BaseModel):
@@ -174,28 +219,53 @@ class ToxicityBySpecies(BaseModel):
     which could not express "toxic to horses, not yet established for dogs" —
     the commonest state of this data by a wide margin.
 
-    Each species takes the literal string `"Toxic"` where toxicity is
-    established. Anything else, including the default `"Unknown"`, is read as
-    not established: the API's derived `toxic_to_humans` tests for `"Toxic"`
-    exactly. `extra="forbid"` because a typo'd species key would silently
-    record a finding under a name nothing reads.
+    Each species is `"Toxic"` where toxicity is established and `"Unknown"`
+    otherwise — the only two values the dataset uses. `extra="forbid"` because
+    a typo'd species key would silently record a finding under a name nothing
+    reads.
+
+    The values are closed for the same reason. The derived `toxic_to_humans`
+    and the species search both test for `"Toxic"` exactly, so a reviewer who
+    typed `"toxic"`, `"Yes"` or `"Mildly toxic"` would have recorded a finding
+    that the API then reports as *not* toxic. Case is forgiven, since it can
+    only have meant one thing; anything else is a 422 naming the two values.
+    Qualifications belong in `notes`.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = _REVIEWER_INPUT
 
-    humans: str | None = None
-    cattle: str | None = None
-    horses: str | None = None
-    sheep: str | None = None
-    goats: str | None = None
-    pigs: str | None = None
-    poultry: str | None = None
-    dogs: str | None = None
-    cats: str | None = None
+    humans: SpeciesFinding | None = None
+    cattle: SpeciesFinding | None = None
+    horses: SpeciesFinding | None = None
+    sheep: SpeciesFinding | None = None
+    goats: SpeciesFinding | None = None
+    pigs: SpeciesFinding | None = None
+    poultry: SpeciesFinding | None = None
+    dogs: SpeciesFinding | None = None
+    cats: SpeciesFinding | None = None
     #: Any species the named keys do not cover.
-    other: str | None = None
+    other: SpeciesFinding | None = None
     #: Free text qualifying the above, e.g. which part or what dose.
     notes: str | None = None
+
+    @field_validator(*TOXICITY_SPECIES, mode="before")
+    @classmethod
+    def _normalise_finding(cls, value: object) -> object:
+        """`" toxic "` → `"Toxic"`; blank → unanswered; anything else as given."""
+        if not isinstance(value, str):
+            return value
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        for finding in ("Toxic", "Unknown"):
+            if cleaned.casefold() == finding.casefold():
+                return finding
+        return cleaned
+
+    @model_validator(mode="after")
+    def _blanks_are_unanswered(self) -> "ToxicityBySpecies":
+        _clear_blanks(self)
+        return self
 
 
 class MorphologicalAttributes(BaseModel):
@@ -208,7 +278,7 @@ class MorphologicalAttributes(BaseModel):
     schema change. Extra keys are kept as given.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
 
     #: Mature height in metres. A number in the curated data, e.g. 1.5.
     height_m: float | str | None = None
@@ -222,6 +292,11 @@ class MorphologicalAttributes(BaseModel):
     fruit_colour: str | None = None
     #: Three-letter month abbreviations, e.g. ["Feb", "Mar", "Apr"].
     flowering_time: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _blanks_are_unanswered(self) -> "MorphologicalAttributes":
+        _clear_blanks(self)
+        return self
 
 
 class PlantIdentification(BaseModel):
@@ -240,7 +315,7 @@ class PlantIdentification(BaseModel):
     with `"Unknown"` — see the warning returned by the approval endpoint.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = _REVIEWER_INPUT
 
     botanical_name: str = Field(..., min_length=1, max_length=255)
     family_name: str | None = None
@@ -266,7 +341,11 @@ class PlantIdentification(BaseModel):
         a reviewer, but storing `{}` would make the field truthy and silence
         the warning that says nothing is recorded — the entry would look
         answered while saying nothing.
+
+        Blank strings and lists are cleared first, for the same reason one
+        level up: `family_name=""` should become `'Unknown'`, not `""`.
         """
+        _clear_blanks(self)
         for name in ("toxin_profile", "toxicity_by_species", "morphological_attributes"):
             value = getattr(self, name)
             if value is not None and not value.model_dump(exclude_none=True):

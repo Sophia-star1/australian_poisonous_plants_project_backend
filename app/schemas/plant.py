@@ -40,10 +40,19 @@ SEARCHABLE_FIELDS: set[str] = {
 
 
 class PlantImageOut(BaseModel):
-    """Compact thumbnail row joined into plant payloads."""
+    """One image row joined into a plant payload.
+
+    Ordered primary-first by the `Plant.images` relationship, so
+    `plant_images[0]` is always the cover.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
+    #: Needed to refer to one specific photo — setting a different cover,
+    #: removing a photo, or just a stable React key. `SubmissionImageOut` has
+    #: always exposed its id; this one did not, which meant a client could
+    #: only address a plant's photos by list position or by URL.
+    id: int
     image_url: str
     #: New in v2; null for photos promoted from a contributor submission,
     #: which have no separately generated thumbnail.
