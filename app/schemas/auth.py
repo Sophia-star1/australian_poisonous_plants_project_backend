@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
 
 from app.core.security import BCRYPT_MAX_PASSWORD_BYTES
 from app.schemas.user import UserOut
@@ -49,7 +49,15 @@ class SignUpRequest(BaseModel):
 
     email: EmailStr
     password: Password
-    full_name: str | None = None
+    #: `app_users.full_name` is VARCHAR(255); without the bound a longer name
+    #: reached the INSERT and came back as a 500.
+    full_name: str | None = Field(None, max_length=255)
+
+    @field_validator("full_name")
+    @classmethod
+    def _blank_name_is_no_name(cls, value: str | None) -> str | None:
+        """Trim it, and store a blank one as no name rather than as spaces."""
+        return (value or "").strip() or None
 
 
 class RefreshRequest(BaseModel):

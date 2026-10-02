@@ -3,6 +3,7 @@
 import time
 import uuid
 
+import structlog
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -19,6 +20,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         """Intercept request, attach request ID, log timing."""
         request_id = str(uuid.uuid4())
         request.state.request_id = request_id
+        # Bound into the context so every line logged while handling this
+        # request carries it, not just the summary line below. Cleared first:
+        # the context is per task, but a stale id is worse than none.
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
 
         start_time = time.perf_counter()
         response = await call_next(request)

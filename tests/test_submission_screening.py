@@ -29,7 +29,13 @@ from PIL import Image
 from app.config import settings
 from app.db.session import get_db
 from app.main import app
-from app.ml.classifier import Decision, UndecodableImageError, Verdict, reset_classifier
+from app.ml.classifier import (
+    Decision,
+    ImageTooLargeError,
+    UndecodableImageError,
+    Verdict,
+    reset_classifier,
+)
 from app.services import submission_service as svc
 from app.services.storage_service import StoredFile
 
@@ -328,6 +334,25 @@ async def test_a_file_that_is_not_really_an_image_is_refused(
 
     assert response.status_code == 422
     assert "not a readable image" in response.json()["message"]
+    assert uploads == []
+
+
+@pytest.mark.asyncio
+async def test_a_photo_with_too_many_pixels_is_refused_not_a_500(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], monkeypatch: Any
+) -> None:
+    """A decompression bomb is the contributor's problem to fix, not a crash."""
+
+    class _Stub:
+        def classify(self, data: bytes) -> Verdict:
+            raise ImageTooLargeError("12000x12000 is 144 megapixels; the limit is 13")
+
+    monkeypatch.setattr(svc, "get_classifier", lambda: _Stub())
+
+    response = await _post(async_client)
+
+    assert response.status_code == 422
+    assert "too large to process" in response.json()["message"]
     assert uploads == []
 
 

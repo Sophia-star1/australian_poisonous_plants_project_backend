@@ -182,6 +182,10 @@ class SubmissionService:
         #: rollback undoes the rows but not the objects, so these are what
         #: `discard_promoted_photos` deletes when the approval does not land.
         self._promoted_keys: list[str] = []
+        #: Keys uploaded into the submission bucket by this request, for the
+        #: same reason: `discard_uploaded_photos` removes them when the rows
+        #: that would have referenced them are not written.
+        self._uploaded_keys: list[str] = []
 
     async def screen(self, photos: list[UploadFile]) -> Screening | None:
         """Score every photo before a single byte reaches storage.
@@ -240,7 +244,24 @@ class SubmissionService:
         stored = await self.storage.upload_file(
             photo, key, bucket=settings.SUPABASE_SUBMISSION_BUCKET
         )
+        self._uploaded_keys.append(stored.key)
         return stored.url or stored.key
+
+    async def discard_uploaded_photos(self) -> None:
+        """Delete what this request uploaded, best effort.
+
+        For when the upload does not land. The comment on `create` used to say
+        a failed storage call rolls everything back, and for the rows it does
+        — but the photos already uploaded before it stay in the bucket with
+        nothing pointing at them. Five photos where the fourth fails left
+        three orphans; a failed commit left all of them.
+
+        Never raises (see `delete_file`), so cleanup cannot replace the error
+        that caused it.
+        """
+        keys, self._uploaded_keys = self._uploaded_keys, []
+        for key in keys:
+            await self.storage.delete_file(key, bucket=settings.SUPABASE_SUBMISSION_BUCKET)
 
     async def create(
         self,
@@ -253,7 +274,8 @@ class SubmissionService:
         the photos can be stored under it before the row is flushed. Uploads
         happen first on purpose: if storage fails the request aborts and the
         transaction rolls back, so a submission never exists with photos that
-        do not.
+        do not. The photos uploaded before the failure are deleted again, so
+        the reverse does not happen either.
 
         Screening runs before the uploads for the same reason in reverse — a
         refused submission should cost nothing in storage, so the photos are
@@ -276,13 +298,17 @@ class SubmissionService:
             ai_top_matches=screening.as_record() if screening else None,
         )
 
-        for i, photo in enumerate(photos):
-            url = await self._store_photo(photo, submission_id)
-            sub.images.append(SubmissionImage(image_url=url, is_primary=(i == 0)))
+        try:
+            for i, photo in enumerate(photos):
+                url = await self._store_photo(photo, submission_id)
+                sub.images.append(SubmissionImage(image_url=url, is_primary=(i == 0)))
 
-        self.db.add(sub)
-        await self.db.flush()
-        await self.db.refresh(sub, attribute_names=["images"])
+            self.db.add(sub)
+            await self.db.flush()
+            await self.db.refresh(sub, attribute_names=["images"])
+        except Exception:
+            await self.discard_uploaded_photos()
+            raise
         return sub
 
     async def list_for_email(
@@ -513,18 +539,22 @@ class SubmissionService:
         )
         has_primary = bool(existing)
 
-        for photo in photos:
-            url = await self._store_photo(photo, submission_id)
-            self.db.add(
-                SubmissionImage(
-                    submission_id=submission_id,
-                    image_url=url,
-                    is_primary=not has_primary,
+        try:
+            for photo in photos:
+                url = await self._store_photo(photo, submission_id)
+                self.db.add(
+                    SubmissionImage(
+                        submission_id=submission_id,
+                        image_url=url,
+                        is_primary=not has_primary,
+                    )
                 )
-            )
-            has_primary = True
+                has_primary = True
 
-        await self.db.flush()
+            await self.db.flush()
+        except Exception:
+            await self.discard_uploaded_photos()
+            raise
         self.db.expire_all()
         return await self.get_by_id(submission_id)
 

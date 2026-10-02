@@ -30,6 +30,7 @@ from app.config import settings
 from app.ml import classifier as mod
 from app.ml.classifier import (
     Decision,
+    ImageTooLargeError,
     PlantClassifier,
     UndecodableImageError,
     Verdict,
@@ -139,6 +140,79 @@ def test_undecodable_bytes_raise_a_named_error() -> None:
     for payload in (b"", b"not an image at all", b"\x89PNG\r\n\x1a\n" + b"\x00" * 40):
         with pytest.raises(UndecodableImageError):
             preprocess(payload, SIZE)
+
+
+# ── decode budget ────────────────────────────────────────────────────────────
+#
+# The budget is shrunk in these tests rather than the images grown: building a
+# real 144-megapixel bomb costs the test run the very memory being guarded.
+
+
+def _jpeg_bytes(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, "JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def test_a_png_over_the_budget_is_refused_before_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The header alone is enough to say no; no pixel is decoded."""
+    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 10_000)
+    decoded: list[Any] = []
+    monkeypatch.setattr(mod.ImageOps, "exif_transpose", lambda im: decoded.append(im))
+
+    with pytest.raises(ImageTooLargeError, match="megapixels"):
+        preprocess(_png(_gradient(200, 200, 1)), SIZE)
+    assert decoded == []
+
+
+def test_a_jpeg_over_the_budget_is_decoded_at_a_reduced_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """libjpeg scales during decoding, so a big JPEG never exists at full size."""
+    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 20_000)
+    sizes: list[tuple[int, int]] = []
+    real = mod.ImageOps.exif_transpose
+
+    def _spy(image: Image.Image) -> Image.Image | None:
+        sizes.append(image.size)
+        return real(image)
+
+    monkeypatch.setattr(mod.ImageOps, "exif_transpose", _spy)
+
+    batch = preprocess(_jpeg_bytes(_gradient(400, 400, 2)), SIZE)
+
+    assert batch.shape == (1, 3, SIZE, SIZE)
+    (decoded,) = sizes
+    assert decoded[0] * decoded[1] <= 20_000
+    assert decoded == (100, 100)  # 1/4 is the first scale under budget
+
+
+def test_a_jpeg_too_large_even_at_one_eighth_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 100)
+    with pytest.raises(ImageTooLargeError):
+        preprocess(_jpeg_bytes(_gradient(400, 400, 3)), SIZE)
+
+
+def test_pillows_own_bomb_guard_is_a_named_error_not_a_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above ~179 MP Pillow raises DecompressionBombError from `Image.open`.
+
+    That is not an OSError or a ValueError, so it escaped every handler and a
+    24 KB file produced a 500.
+    """
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1_000)
+    with pytest.raises(ImageTooLargeError):
+        preprocess(_png(_gradient(100, 100, 4)), SIZE)
+
+
+def test_a_photo_within_the_budget_takes_the_unchanged_path() -> None:
+    """A standard 12.2 MP phone photo must stay on the bit-identical path."""
+    assert mod.MAX_DECODE_PIXELS >= 4032 * 3024
 
 
 # ── grading ──────────────────────────────────────────────────────────────────

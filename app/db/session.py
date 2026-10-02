@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 from uuid import uuid4
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -86,6 +87,12 @@ def get_session_factory():
         class_=AsyncSession,
         expire_on_commit=False,
     )
+
+
+async def ping() -> None:
+    """Round-trip one trivial query, raising if the database cannot answer."""
+    async with get_engine().connect() as connection:
+        await connection.execute(text("SELECT 1"))
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:

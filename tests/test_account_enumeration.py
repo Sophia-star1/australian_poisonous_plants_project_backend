@@ -12,7 +12,7 @@ from httpx import AsyncClient
 from app import dependencies
 from app.core.security import create_access_token
 from app.models.user import User
-from app.schemas.auth import SignUpRequest
+from app.schemas.auth import LoginRequest, SignUpRequest
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
 
@@ -97,3 +97,41 @@ async def test_disabled_account_is_anonymous_to_optional_dependency(
         token=create_access_token({"sub": "1"}), db=None  # type: ignore[arg-type]
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_address_still_pays_for_a_bcrypt_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same message was not enough: skipping the hash answered ~200 ms sooner."""
+    from app.services import auth_service
+
+    compared: list[str] = []
+
+    def _verify(password: str, hashed: str) -> bool:
+        compared.append(hashed)
+        return False
+
+    async def _missing(self: Any, email: str) -> None:
+        return None
+
+    monkeypatch.setattr(auth_service, "verify_password", _verify)
+    monkeypatch.setattr(UserService, "get_by_email", _missing)
+
+    with pytest.raises(Exception, match="Incorrect email or password"):
+        await AuthService(db=None).authenticate(  # type: ignore[arg-type]
+            LoginRequest(email="nobody@example.com", password="whatever-it-is")
+        )
+
+    assert len(compared) == 1
+    assert compared[0].startswith("$2"), "compared against something that is not bcrypt"
+
+
+def test_the_equaliser_hash_costs_what_a_stored_one_does() -> None:
+    """Same cost factor, or the comparison is quicker and the gap comes back."""
+    from app.core.security import get_password_hash
+    from app.services.auth_service import _timing_equaliser_hash
+
+    stored = get_password_hash("a-valid-password")
+    # bcrypt hashes read `$2b$<cost>$...`.
+    assert _timing_equaliser_hash().split("$")[2] == stored.split("$")[2]

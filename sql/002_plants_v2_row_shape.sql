@@ -29,6 +29,8 @@
 -- and reports the offending ids rather than failing with a bare violation.
 -- Re-runnable: an existing constraint is left alone.
 --
+-- Applied to the project database on 2026-10-02; all five constraints added.
+--
 -- Run once against the project database, either in the Supabase SQL editor or
 -- with psql. Note `psql` does not accept the app's `DATABASE_URL` as-is: drop
 -- the `+asyncpg` from its scheme first.
