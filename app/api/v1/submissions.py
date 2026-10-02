@@ -34,7 +34,7 @@ from app.core.exceptions import (
 )
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
-from app.ml.classifier import UndecodableImageError
+from app.ml.classifier import ImageTooLargeError, UndecodableImageError
 from app.models.plant import Plant, not_recorded
 from app.models.submission import Submission
 from app.models.user import User
@@ -216,6 +216,13 @@ async def create_submission(
         # so the contributor can fix it and retry, rather than as a generic
         # rejection they cannot act on.
         raise UnprocessableError(str(exc)) from exc
+    except ImageTooLargeError as exc:
+        # The header declares more pixels than screening can decode safely.
+        # A 17 KB file can claim 144 megapixels; decoding it is the attack.
+        raise UnprocessableError(
+            f"One of the photos is too large to process ({exc}). Export it at a "
+            "smaller size, or as a JPEG, and try again."
+        ) from exc
     except UndecodableImageError as exc:
         # The declared content type said image; the bytes disagree. Caught
         # here only because screening is the first thing that tries to decode
