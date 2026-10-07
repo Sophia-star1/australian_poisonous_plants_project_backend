@@ -315,17 +315,36 @@ async def test_the_verdict_is_stored_on_the_submission(
     async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any, _isolated: Any
 ) -> None:
     """A reviewer needs the score, not just the boolean."""
-    verdicts((Decision.ACCEPT, 0.97), (Decision.FLAG, 0.42))
+    verdicts((Decision.ACCEPT, 0.97), (Decision.ACCEPT, 0.88))
 
     await _post(async_client, _file("a.jpg"), _file("b.jpg"))
 
     row = _isolated.added[0]
     assert row.ai_is_plant is True
     record = row.ai_top_matches["screening"]
-    assert record["plant_probability"] == 0.97, "the best photo speaks for the submission"
-    assert [p["plant_probability"] for p in record["photos"]] == [0.97, 0.42]
+    assert record["plant_probability"] == 0.88, "the weakest photo speaks for the submission"
+    assert [p["plant_probability"] for p in record["photos"]] == [0.97, 0.88]
     # ai_top_matches is jsonb; anything not JSON-native fails at the driver.
     assert json.loads(json.dumps(row.ai_top_matches)) == row.ai_top_matches
+
+
+@pytest.mark.asyncio
+async def test_one_uncertain_photo_marks_the_submission_for_the_reviewer(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any, _isolated: Any
+) -> None:
+    """Regression: a good photo used to vouch for an uncertain one.
+
+    `ai_is_plant` was true if any photo was a confident plant, so a doubtful
+    photo beside a clear one reached the reviewer marked as a plant.
+    """
+    verdicts((Decision.ACCEPT, 0.97), (Decision.FLAG, 0.42))
+
+    response = await _post(async_client, _file("a.jpg"), _file("b.jpg"))
+
+    assert response.status_code == 201
+    row = _isolated.added[0]
+    assert row.ai_is_plant is False
+    assert row.ai_top_matches["screening"]["plant_probability"] == 0.42
 
 
 @pytest.mark.asyncio

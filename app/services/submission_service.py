@@ -173,20 +173,32 @@ class NotAPlantError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Screening:
-    """What screening concluded about a whole submission."""
+    """What screening concluded about a whole submission.
 
-    is_plant: bool
+    The weakest photo speaks for the submission, matching the refusal rule
+    that every photo must show the plant. Reporting the best photo instead
+    marked a submission as a plant on the strength of one good frame, hiding
+    exactly the uncertain photo a reviewer should be pointed at.
+    """
+
     per_photo: list[Verdict]
 
     @property
-    def best(self) -> float:
-        return max((v.confidence for v in self.per_photo), default=0.0)
+    def is_plant(self) -> bool:
+        """`ai_is_plant`: true only when every photo is a confident plant."""
+        return bool(self.per_photo) and all(
+            v.decision is Decision.ACCEPT for v in self.per_photo
+        )
+
+    @property
+    def weakest(self) -> float:
+        return min((v.confidence for v in self.per_photo), default=0.0)
 
     def as_record(self) -> dict[str, Any]:
         """Shape written to `submissions.ai_top_matches`."""
         return {
             "screening": {
-                "plant_probability": self.best,
+                "plant_probability": self.weakest,
                 "photos": [v.as_dict() for v in self.per_photo],
             }
         }
@@ -259,10 +271,7 @@ class SubmissionService:
         if rejected:
             raise NotAPlantError(rejected, total=len(verdicts))
 
-        return Screening(
-            is_plant=any(v.decision is Decision.ACCEPT for v in verdicts),
-            per_photo=verdicts,
-        )
+        return Screening(per_photo=verdicts)
 
     async def _store_photo(self, photo: UploadFile, submission_id: UUID) -> str:
         """Upload one photo and return the URL to record against the row.

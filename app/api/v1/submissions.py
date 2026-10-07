@@ -195,7 +195,8 @@ async def create_submission(
     refused with a message naming that photo by position. An uncertain photo
     is accepted and marked for the reviewer. The verdict is returned in
     `ai_is_plant` and `ai_top_matches`, and is `null` when screening was
-    unavailable.
+    unavailable. `ai_is_plant` is true only when every photo is a confident
+    plant, and `plant_probability` is that of the weakest photo.
 
     Photographs are kept as the record of what was submitted, and copied into
     the plant library only if a reviewer approves.
