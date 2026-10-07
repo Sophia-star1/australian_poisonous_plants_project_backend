@@ -127,3 +127,21 @@ async def test_signed_in_without_full_name_falls_back_to_email_local_part(
 
     assert response.status_code == 201
     assert captured["payload"].contributor_name == "someone"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_display_name_also_falls_back(
+    async_client: AsyncClient, captured: dict[str, Any]
+) -> None:
+    """A stored name of only spaces is truthy; it must not reach the length check."""
+    app.dependency_overrides[get_optional_user] = lambda: _user("someone@example.com", "   ")
+    try:
+        body = _multipart()
+        response = await async_client.post(
+            "/api/v1/submissions/", files=body["files"], data=body["data"]
+        )
+    finally:
+        app.dependency_overrides.pop(get_optional_user, None)
+
+    assert response.status_code == 201, response.text
+    assert captured["payload"].contributor_name == "someone"

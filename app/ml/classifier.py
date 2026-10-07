@@ -66,6 +66,22 @@ _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 #: Ratio between the resize target and the crop, from the training transform.
 _RESIZE_RATIO = 1.15
 
+#: The most pixels `preprocess` will decode at full resolution.
+#:
+#: Decoding is where the memory goes, and it scales with pixels, not with
+#: file size: measured at ~12 bytes per pixel at peak (the decoded RGB plus
+#: the copies `exif_transpose` and `convert` make). An ordinary 48-megapixel
+#: phone photo — 7.4 MB, inside the upload limit — peaks at 586 MB, so two at
+#: once overrun the 1 GiB Cloud Run instance; a 17 KB PNG declaring 144
+#: megapixels peaked at 865 MB on its own. At 13 MP the four screening
+#: slots (`PLANT_SCREENING_CONCURRENCY`) stay near 620 MB together, on top of
+#: the ~170 MB the process holds anyway.
+#:
+#: 13 rather than 12 so a standard 4032x3024 (12.2 MP) phone photo still takes
+#: the full-resolution path, whose tensors are bit-identical to the training
+#: transform.
+MAX_DECODE_PIXELS = 13_000_000
+
 
 class Decision(StrEnum):
     """What the pipeline should do with an upload."""
@@ -100,6 +116,49 @@ class UndecodableImageError(ValueError):
     """The bytes are not an image any decoder here understands."""
 
 
+class ImageTooLargeError(ValueError):
+    """The image declares more pixels than can be decoded safely."""
+
+
+def _open_within_budget(data: bytes) -> Image.Image:
+    """Open `data` so that decoding it cannot exceed `MAX_DECODE_PIXELS`.
+
+    `Image.open` reads only the header, so the declared size is known before a
+    single pixel is decoded. A JPEG over budget is decoded at a reduced scale
+    instead — libjpeg can produce 1/2, 1/4 or 1/8 directly from the DCT
+    coefficients, without ever holding the full image. The model sees 224 px
+    in the end, so nothing it could use is lost; the tensor is no longer
+    bit-identical to the training transform, which is acceptable for photos
+    that would otherwise not be screenable at all. Other formats have no such
+    path and are refused.
+
+    Pillow's own guard is a backstop, not the limit: it only raises above
+    ~179 MP and merely warns from ~89 MP.
+    """
+    try:
+        opened = Image.open(io.BytesIO(data))
+    except Image.DecompressionBombError as exc:
+        raise ImageTooLargeError(str(exc)) from exc
+
+    width, height = opened.size
+    if width * height <= MAX_DECODE_PIXELS:
+        return opened
+
+    if opened.format == "JPEG":
+        scale = 2
+        while scale < 8 and -(-width // scale) * -(-height // scale) > MAX_DECODE_PIXELS:
+            scale *= 2
+        opened.draft("RGB", (-(-width // scale), -(-height // scale)))
+        reduced_w, reduced_h = opened.size
+        if reduced_w * reduced_h <= MAX_DECODE_PIXELS:
+            return opened
+
+    raise ImageTooLargeError(
+        f"{width}x{height} is {width * height / 1e6:.0f} megapixels; the limit is "
+        f"{MAX_DECODE_PIXELS / 1e6:.0f} for this format."
+    )
+
+
 def preprocess(data: bytes, size: int) -> np.ndarray:
     """Bytes to a normalised NCHW batch of one.
 
@@ -107,10 +166,16 @@ def preprocess(data: bytes, size: int) -> np.ndarray:
     plus a rotation flag rather than rotating the pixels, so without this a
     portrait photo reaches the model on its side — not what the model saw in
     training, and not what the contributor believes they sent.
+
+    Raises:
+        UndecodableImageError: the bytes are not an image.
+        ImageTooLargeError: the pixel dimensions are beyond the decode budget.
     """
     try:
-        opened = Image.open(io.BytesIO(data))
+        opened = _open_within_budget(data)
         image: Image.Image = (ImageOps.exif_transpose(opened) or opened).convert("RGB")
+    except ImageTooLargeError:
+        raise
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise UndecodableImageError("The file could not be read as an image.") from exc
 

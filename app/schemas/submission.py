@@ -4,7 +4,7 @@ import hashlib
 from collections.abc import Iterable
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -87,15 +87,27 @@ class SubmissionImageOut(BaseModel):
     is_primary: bool = False
 
 
+#: Valid coordinate ranges. Nothing bounded them, so `latitude=999` was stored
+#: as given and a map placing the observation would fail or wrap silently.
+Latitude = Annotated[Decimal, Field(ge=-90, le=90)]
+Longitude = Annotated[Decimal, Field(ge=-180, le=180)]
+
+
 class SubmissionCreate(BaseModel):
-    """Non-file fields accepted by `POST /submissions/`."""
+    """Non-file fields accepted by `POST /submissions/`.
+
+    Whitespace is stripped before the length checks, so a name of `"   "`
+    fails `min_length` instead of being stored as an empty string.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
     user_description: str | None = None
     contributor_name: str = Field(..., min_length=1, max_length=255)
     contributor_email: EmailStr
     location_state: str | None = None
-    latitude: Decimal | None = None
-    longitude: Decimal | None = None
+    latitude: Latitude | None = None
+    longitude: Longitude | None = None
 
 
 class SubmissionOut(BaseModel):
@@ -397,10 +409,33 @@ class SubmissionContentUpdate(BaseModel):
     reviewer.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     contributor_name: str | None = Field(None, min_length=1, max_length=255)
     user_description: str | None = None
     location_state: str | None = None
-    latitude: Decimal | None = None
-    longitude: Decimal | None = None
+    latitude: Latitude | None = None
+    longitude: Longitude | None = None
+
+    @field_validator("contributor_name")
+    @classmethod
+    def _name_cannot_be_cleared(cls, value: str | None) -> str | None:
+        """Omit the name to keep it; `null` is not a name.
+
+        The column is NOT NULL, so `{"contributor_name": null}` used to reach
+        the UPDATE and come back as a 500. Unlike the other fields, there is
+        nothing for null to mean here.
+        """
+        if value is None:
+            raise ValueError("cannot be null; omit it to leave the name unchanged")
+        return value
+
+    @field_validator("user_description", "location_state")
+    @classmethod
+    def _blank_clears(cls, value: str | None) -> str | None:
+        """A blank answer clears the field, the same as `null` does.
+
+        Matches `POST /submissions/`, which stores an empty description as
+        NULL rather than as `""`.
+        """
+        return value or None

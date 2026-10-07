@@ -34,7 +34,7 @@ from app.core.exceptions import (
 )
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
-from app.ml.classifier import UndecodableImageError
+from app.ml.classifier import ImageTooLargeError, UndecodableImageError
 from app.models.plant import Plant, not_recorded
 from app.models.submission import Submission
 from app.models.user import User
@@ -117,6 +117,23 @@ def _validate_photos(photos: list[UploadFile]) -> None:
             )
 
 
+async def _commit_uploads(db: AsyncSession, service: SubmissionService) -> None:
+    """Commit before answering, and take the uploaded photos back if that fails.
+
+    `get_db` commits only after the response has been sent — measured on the
+    deployed FastAPI 0.136 as well as 0.142 — so a commit failing there
+    reaches nobody: the contributor has their 201, the rows are gone, and the
+    photos sit in the bucket with nothing pointing at them. Committing here
+    turns that into an error the client sees. The commit `get_db` makes
+    afterwards finds nothing pending.
+    """
+    try:
+        await db.commit()
+    except Exception:
+        await service.discard_uploaded_photos()
+        raise
+
+
 def _is_owner(submission: Submission, user: User) -> bool:
     """Ownership is by contributor email — the schema has no user FK."""
     return submission.contributor_email.lower() == user.email.lower()
@@ -195,7 +212,10 @@ async def create_submission(
         # client-supplied address was not merely a data quality problem:
         # submitting under someone else's email put the record in their list.
         contributor_email = current_user.email
-        contributor_name = current_user.full_name or current_user.email.split("@")[0]
+        # Stripped first: a stored name of only spaces is truthy, and would
+        # then fail the name's length check and refuse a signed-in upload.
+        mailbox = current_user.email.split("@")[0]
+        contributor_name = (current_user.full_name or "").strip() or mailbox
 
     try:
         payload = SubmissionCreate(
@@ -209,13 +229,21 @@ async def create_submission(
     except ValidationError as exc:
         raise UnprocessableError(str(exc)) from exc
 
+    service = SubmissionService(db)
     try:
-        row = await SubmissionService(db).create(payload=payload, photos=photos)
+        row = await service.create(payload=payload, photos=photos)
     except NotAPlantError as exc:
         # Screening is confident none of the photos show a plant. Said plainly
         # so the contributor can fix it and retry, rather than as a generic
         # rejection they cannot act on.
         raise UnprocessableError(str(exc)) from exc
+    except ImageTooLargeError as exc:
+        # The header declares more pixels than screening can decode safely.
+        # A 17 KB file can claim 144 megapixels; decoding it is the attack.
+        raise UnprocessableError(
+            f"One of the photos is too large to process ({exc}). Export it at a "
+            "smaller size, or as a JPEG, and try again."
+        ) from exc
     except UndecodableImageError as exc:
         # The declared content type said image; the bytes disagree. Caught
         # here only because screening is the first thing that tries to decode
@@ -225,9 +253,13 @@ async def create_submission(
         ) from exc
     except StorageError as exc:
         # Surface the storage failure instead of writing a submission whose
-        # photos do not exist. The session rolls back with the request.
+        # photos do not exist. The session rolls back with the request, and
+        # the service has already deleted whatever it uploaded first.
         raise UnprocessableError(str(exc)) from exc
-    return ApiResponse.success(data=SubmissionOut.model_validate(row))
+
+    out = SubmissionOut.model_validate(row)
+    await _commit_uploads(db, service)
+    return ApiResponse.success(data=out)
 
 
 @router.get("/me", response_model=ApiResponse[PageResult[SubmissionOut]])
@@ -342,7 +374,8 @@ async def add_submission_photos(
     * `403` — an administrator adding to somebody else's submission.
     * `404` — no such submission, or it is not yours.
     * `409` — already approved or rejected.
-    * `422` — unsupported type, or the total would exceed ten.
+    * `422` — unsupported type, a file over the size limit, or the total would
+      exceed ten.
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
@@ -358,12 +391,20 @@ async def add_submission_photos(
             f"({existing} already attached)."
         )
 
-    updated = await service.add_photos(submission_id, photos)
+    try:
+        updated = await service.add_photos(submission_id, photos)
+    except StorageError as exc:
+        # An oversized or empty file, or storage being unavailable. Caught on
+        # upload but not here, so the same mistake was a 422 when creating a
+        # submission and a 500 when adding to one.
+        raise UnprocessableError(str(exc)) from exc
     if updated is None:
         raise ConflictError(
             "This submission was reviewed while you were editing. Reload to see the outcome."
         )
-    return ApiResponse.success(data=SubmissionOut.model_validate(updated))
+    out = SubmissionOut.model_validate(updated)
+    await _commit_uploads(db, service)
+    return ApiResponse.success(data=out)
 
 
 @router.delete(
