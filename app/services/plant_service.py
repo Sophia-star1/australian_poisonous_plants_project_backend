@@ -3,6 +3,7 @@
 Everything the mobile screens need lives here:
 
 * `list_plants` — browse list, ordered by botanical name.
+* `count_plants` — how many rows that list holds, counted in SQL.
 * `get_plant` — full detail row (with images joined in).
 * `search_plants` — ranked search across name, family, origin, lethality,
   toxic parts, distribution, health effects, the toxicity profile and the
@@ -164,6 +165,11 @@ class PlantService:
             stmt = stmt.limit(limit)
         result = await self.db.execute(stmt)
         return result.scalars().all()
+
+    async def count_plants(self) -> int:
+        """The number of plants `list_plants` returns when given no limit."""
+        total = await self.db.scalar(select(func.count()).select_from(Plant))
+        return int(total or 0)
 
     async def get_plant(self, plant_id: int) -> Plant | None:
         stmt = (

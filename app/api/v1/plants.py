@@ -4,6 +4,7 @@ Replaces the mobile app's direct Supabase calls
 (`from('plants').select(...)`) with a real REST surface:
 
 * `GET  /plants/`         — full browse list (ordered by botanical name).
+* `GET  /plants/count`    — how many plants there are.
 * `GET  /plants/search`   — ranked search (debounced from the client).
 * `GET  /plants/{id}`     — full detail row, images joined in.
 """
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppException, NotFoundError
 from app.db.session import get_db
 from app.schemas.common import ApiResponse
-from app.schemas.plant import SEARCHABLE_FIELDS, PlantDetail, PlantSummary
+from app.schemas.plant import SEARCHABLE_FIELDS, PlantCount, PlantDetail, PlantSummary
 from app.services.plant_service import SEARCH_DEFAULT_LIMIT, PlantService
 
 router = APIRouter()
@@ -38,6 +39,19 @@ async def list_plants(
     return ApiResponse.success(
         data=[PlantSummary.model_validate(row) for row in rows]
     )
+
+
+# Declared ahead of `/{plant_id}`, which would otherwise take "count" as an id
+# and answer 422 because it is not an integer.
+@router.get("/count", response_model=ApiResponse[PlantCount])
+async def count_plants(db: AsyncSession = Depends(get_db)) -> ApiResponse[PlantCount]:
+    """How many plants the library holds. Public.
+
+    The same plants `GET /plants/` lists, counted by the database, so a client
+    that only needs the number does not have to download every summary.
+    """
+    total = await PlantService(db).count_plants()
+    return ApiResponse.success(data=PlantCount(total=total))
 
 
 @router.get("/search", response_model=ApiResponse[list[PlantSummary]])
