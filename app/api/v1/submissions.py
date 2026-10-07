@@ -97,9 +97,7 @@ def _validate_photos(photos: list[UploadFile]) -> None:
     """Reject anything that is not a plausible plant photo.
 
     Checked before a single byte is uploaded, so a bad request costs nothing
-    in storage. The declared content type is not trustworthy on its own — it
-    is client-supplied — but rejecting on it stops the honest mistakes, and
-    the storage key never carries an executable extension either way.
+    in storage.
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
@@ -107,6 +105,18 @@ def _validate_photos(photos: list[UploadFile]) -> None:
         raise UnprocessableError(
             f"A submission may include at most {MAX_PHOTOS_PER_SUBMISSION} photos."
         )
+    _validate_photo_types(photos)
+
+
+def _validate_photo_types(photos: list[UploadFile]) -> None:
+    """Reject any file whose declared type is not an allowed image type.
+
+    Shared by creating a submission and adding photos to one: without it on
+    the add path, anything could be attached to a pending submission once it
+    existed. The declared content type is not trustworthy on its own — it is
+    client-supplied — but rejecting on it stops the honest mistakes, and the
+    storage key never carries an executable extension either way.
+    """
     for photo in photos:
         content_type = (photo.content_type or "").split(";")[0].strip().lower()
         if content_type not in settings.ALLOWED_IMAGE_TYPES:
@@ -400,6 +410,9 @@ async def add_submission_photos(
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
+    # Per file only: the limit here is on the combined total, checked below
+    # once the existing photos have been counted.
+    _validate_photo_types(photos)
 
     service = SubmissionService(db)
     submission = await _load_for_user(service, submission_id, current_user)

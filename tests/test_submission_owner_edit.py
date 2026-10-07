@@ -330,6 +330,31 @@ async def test_photo_limit_is_enforced(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content_type"),
+    [("notes.txt", "text/plain"), ("scan.pdf", "application/pdf")],
+)
+async def test_adding_a_non_image_is_a_422(
+    async_client: AsyncClient,
+    as_user: Any,
+    stub_service: Any,
+    filename: str,
+    content_type: str,
+) -> None:
+    """Same type check as the original upload, before anything is stored."""
+    as_user(_user())
+    calls = stub_service(FakeSubmission(), photo_count=1)
+
+    response = await async_client.post(
+        f"/api/v1/submissions/{SUBMISSION_ID}/photos",
+        files={"photos": (filename, b"not an image", content_type)},
+    )
+    assert response.status_code == 422
+    assert "unsupported type" in response.json()["message"]
+    assert "added" not in calls
+
+
+@pytest.mark.asyncio
 async def test_a_photo_screening_refuses_is_a_422_when_adding(
     async_client: AsyncClient, as_user: Any, stub_service: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
