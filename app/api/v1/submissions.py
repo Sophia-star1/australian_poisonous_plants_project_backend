@@ -190,9 +190,10 @@ async def create_submission(
     `contributor_email` in the form are ignored, and the submission then
     appears in `GET /submissions/me` and can be edited while it is pending.
 
-    Every photograph is screened for whether it shows a plant. A submission
-    where none of them do is refused with an explanation; an uncertain one is
-    accepted and marked for the reviewer. The verdict is returned in
+    Every photograph is screened for whether it shows a plant, and every one
+    of them must: if any photo clearly does not, the whole submission is
+    refused with a message naming that photo by position. An uncertain photo
+    is accepted and marked for the reviewer. The verdict is returned in
     `ai_is_plant` and `ai_top_matches`, and is `null` when screening was
     unavailable.
 
@@ -202,8 +203,8 @@ async def create_submission(
     Errors:
 
     * `422` — unsupported file type, more than ten photographs, a file that is
-      not a readable image, one that exceeds the size limit, or nothing among
-      them that appears to be a plant.
+      not a readable image, one that exceeds the size limit, or a photo that
+      does not appear to be a plant.
     """
     _validate_photos(photos)
 
@@ -233,9 +234,9 @@ async def create_submission(
     try:
         row = await service.create(payload=payload, photos=photos)
     except NotAPlantError as exc:
-        # Screening is confident none of the photos show a plant. Said plainly
-        # so the contributor can fix it and retry, rather than as a generic
-        # rejection they cannot act on.
+        # Screening is confident at least one photo does not show a plant.
+        # Said plainly, naming the photo, so the contributor can fix it and
+        # retry rather than face a generic rejection they cannot act on.
         raise UnprocessableError(str(exc)) from exc
     except ImageTooLargeError as exc:
         # The header declares more pixels than screening can decode safely.

@@ -210,7 +210,7 @@ async def test_a_refusal_costs_no_storage(
     Uploading and then deleting would work too, but it would pay for the
     bandwidth of exactly the traffic this exists to turn away.
     """
-    verdicts((Decision.REJECT, 0.01), (Decision.REJECT, 0.03))
+    verdicts((Decision.ACCEPT, 0.97), (Decision.REJECT, 0.03))
 
     response = await _post(async_client, _file("a.jpg"), _file("b.jpg"))
 
@@ -229,19 +229,66 @@ async def test_the_message_tells_the_contributor_what_to_do(
 
 
 @pytest.mark.asyncio
-async def test_one_bad_photo_among_several_is_not_a_refusal(
+async def test_one_non_plant_photo_refuses_the_whole_submission(
     async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
 ) -> None:
-    """Only a submission with nothing plant-like in it is turned away.
+    """Regression: a plant photo used to carry a non-plant one through.
 
-    A contributor photographing a shrub from four angles may well catch one
-    frame of dirt. Refusing the lot would lose the other three, and the model
-    is not accurate enough to be given that authority — it puts 7 of this
-    project's own 104 curated plant photographs below its default cutoff.
+    Only an all-negative set was refused, so a non-plant first photo followed
+    by a plant was accepted. Every photo has to pass on its own now.
     """
     verdicts((Decision.REJECT, 0.01), (Decision.ACCEPT, 0.98))
 
     response = await _post(async_client, _file("bad.jpg"), _file("good.jpg"))
+
+    assert response.status_code == 422
+    assert "Photo 1 of 2 does not appear to show a plant" in response.json()["message"]
+    assert uploads == [], "the plant photo is not kept either"
+
+
+@pytest.mark.asyncio
+async def test_the_position_of_the_bad_photo_does_not_matter(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """The primary photo is not special: a bad last photo refuses just the same."""
+    verdicts((Decision.ACCEPT, 0.98), (Decision.ACCEPT, 0.95), (Decision.REJECT, 0.04))
+
+    response = await _post(async_client, _file("a.jpg"), _file("b.jpg"), _file("c.jpg"))
+
+    assert response.status_code == 422
+    assert "Photo 3 of 3" in response.json()["message"]
+    assert uploads == []
+
+
+@pytest.mark.asyncio
+async def test_every_bad_photo_is_named_in_one_refusal(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """Screening finishes the set, so the contributor fixes it in one retry."""
+    seen = verdicts((Decision.REJECT, 0.02), (Decision.ACCEPT, 0.97), (Decision.REJECT, 0.05))
+
+    response = await _post(async_client, _file("a.jpg"), _file("b.jpg"), _file("c.jpg"))
+
+    assert response.status_code == 422
+    message = response.json()["message"]
+    assert "Photos 1 and 3 of 3 do not appear to show a plant" in message
+    assert "replace them" in message
+    assert len(seen) == 3, "every photo was scored before deciding"
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_photo_among_plants_is_not_a_refusal(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """Only a confident negative refuses; the middle band stays for review.
+
+    That band is where specimen shots and bark close-ups land. Refusing it
+    would turn honest contributors away, since the model puts 7 of this
+    project's own 104 curated plant photographs below its default cutoff.
+    """
+    verdicts((Decision.FLAG, 0.3), (Decision.ACCEPT, 0.98))
+
+    response = await _post(async_client, _file("bark.jpg"), _file("leaf.jpg"))
 
     assert response.status_code == 201
     assert len(uploads) == 2, "both photos are kept"

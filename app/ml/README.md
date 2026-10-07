@@ -107,7 +107,7 @@ a missing-file error on the first upload after deploy.
 POST /submissions/
   ├─ content-type whitelist, photo count           existing checks
   ├─ screen(): read → classify → rewind            ← here
-  │     every photo REJECT  → 422, nothing stored
+  │     any photo REJECT    → 422, nothing stored
   │     otherwise           → carry on
   ├─ upload each photo to submission-images
   └─ insert the row, with ai_is_plant / ai_top_matches
@@ -128,9 +128,12 @@ The verdict lands in columns that already existed:
 | `ai_is_plant`    | boolean | `NULL` when screening did not run — distinct from `false` |
 | `ai_top_matches` | jsonb   | `{"screening": {"plant_probability": …, "photos": […]}}` |
 
-**A submission is refused only when every photo is a confident negative.** One
-stray frame among several is far more likely to be an honest mistake than
-abuse, and the model is not accurate enough to be given that authority.
+**A submission is refused when any photo is a confident negative.** Every
+photo in a submission must show the plant, and each one is judged exactly as
+it would be on its own. Refusing only an all-negative set let a single plant
+photo carry any number of non-plant ones through. The uncertain band is still
+accepted and marked for the reviewer, for the reason above: it is where the
+specimen shots and bark close-ups land.
 
 ## Still outstanding before this can be switched on
 

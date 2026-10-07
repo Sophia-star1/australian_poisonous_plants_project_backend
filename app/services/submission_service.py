@@ -139,16 +139,36 @@ def _unknown_defaults() -> dict[str, Any]:
 
 
 class NotAPlantError(ValueError):
-    """Raised when screening is confident that no photo shows a plant."""
+    """Raised when screening is confident that a photo does not show a plant.
 
-    def __init__(self, probabilities: list[float]) -> None:
-        best = max(probabilities) if probabilities else 0.0
+    `rejected` pairs the 1-based position of each such photo, in the order it
+    was sent, with its plant probability. The message names the positions, so
+    a contributor with several photos knows which one to replace instead of
+    guessing.
+    """
+
+    def __init__(self, rejected: list[tuple[int, float]], total: int) -> None:
+        positions = [position for position, _ in rejected]
+        if total == 1:
+            subject = "This photo does not"
+        elif len(positions) == 1:
+            subject = f"Photo {positions[0]} of {total} does not"
+        else:
+            listed = ", ".join(map(str, positions[:-1])) + f" and {positions[-1]}"
+            subject = f"Photos {listed} of {total} do not"
+        confidence = f" (confidence {rejected[0][1]:.0%})" if len(rejected) == 1 else ""
+        if total == 1:
+            action, tail = "Please upload", ""
+        else:
+            pronoun = "it" if len(rejected) == 1 else "them"
+            action = f"Every photo must show the plant: replace {pronoun} with"
+            tail = f" — or remove {pronoun}"
         super().__init__(
-            "None of the uploaded photos appear to show a plant "
-            f"(highest confidence {best:.0%}). Please upload a photo of the "
-            "plant itself — a leaf, flower, fruit, bark or the whole plant."
+            f"{subject} appear to show a plant{confidence}. {action} a photo of the "
+            f"plant itself — a leaf, flower, fruit, bark or the whole plant{tail}."
         )
-        self.probabilities = probabilities
+        self.rejected = rejected
+        self.probabilities = [probability for _, probability in rejected]
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,13 +215,19 @@ class SubmissionService:
         classifier that cannot load must not take the upload path down with
         it.
 
-        The submission is refused only when *every* photo is a confident
-        negative. Refusing on any single one would be harsher than the model
-        earns: it turns away 7 of the 104 photographs in this project's own
-        curated library at its default cutoff, and one stray frame among
-        several is far more likely to be an honest mistake than an abuse. A
-        photo in the uncertain band still goes through, marked for the
-        reviewer rather than bounced back at the contributor.
+        The submission is refused when *any* photo is a confident negative:
+        every photograph in it must show the plant. Each photo is judged
+        exactly as it would be if it were sent alone, so adding a plant photo
+        can no longer carry a non-plant one through — which is what refusing
+        only an all-negative set allowed. A photo in the uncertain band still
+        goes through, marked for the reviewer rather than bounced back at the
+        contributor: that band is where specimen shots and bark close-ups
+        land, and the model puts 7 of the 104 photographs in this project's
+        own curated library below its default cutoff.
+
+        Every photo is scored before deciding rather than stopping at the
+        first refusal, so the message can name all the photos to replace in
+        one round trip instead of one per retry.
 
         Each photo is read, scored, then released, so peak memory is one
         photo rather than all ten. `rewind` leaves the handle ready for the
@@ -225,8 +251,13 @@ class SubmissionService:
                 # instance is serving.
                 verdicts.append(await run_in_threadpool(classifier.classify, data))
 
-        if all(v.decision is Decision.REJECT for v in verdicts):
-            raise NotAPlantError([v.confidence for v in verdicts])
+        rejected = [
+            (position, v.confidence)
+            for position, v in enumerate(verdicts, start=1)
+            if v.decision is Decision.REJECT
+        ]
+        if rejected:
+            raise NotAPlantError(rejected, total=len(verdicts))
 
         return Screening(
             is_plant=any(v.decision is Decision.ACCEPT for v in verdicts),
