@@ -76,11 +76,17 @@ up to 0.06, comfortably enough to move a photo across a threshold.
 | setting                     | default | meaning                              |
 | --------------------------- | ------- | ------------------------------------ |
 | `PLANT_CLASSIFIER_ENABLED`  | `true`  | off switch                           |
-| `PLANT_REJECT_BELOW`        | `0.10`  | under this the upload is refused     |
+| `PLANT_REJECT_BELOW`        | `0.50`  | under this the upload is refused     |
 | `PLANT_ACCEPT_AT`           | `0.70`  | at or over this it counts as a plant |
 
-`0.10` rejects 1 of the 104 library images rather than 7. It is a floor for
-obvious rubbish, not a real plant detector.
+`PLANT_REJECT_BELOW` was `0.10`, which rejected 1 of the 104 library images,
+but ordinary non-plants landed above it and were accepted: screenshots scored
+0.24–0.49 and a blank frame about 0.32. At `0.50` those are refused, at the
+cost of 6 of the 104 library images (5.8%) — the specimen shots, bark
+close-ups and non-green parts described above. Because every photo in a
+submission must pass, an honest submission's chance of being refused grows
+with its photo count. Lower the variable to trade back; it needs no code
+change.
 
 `get_classifier()` returns `None` when the weights are absent or the feature is
 off, and callers read that as "no opinion" — never as a rejection. A checkout
