@@ -109,6 +109,9 @@ def service(monkeypatch: pytest.MonkeyPatch) -> Any:
             "app.services.submission_service.StorageService.delete_file", _delete_file
         )
         monkeypatch.setattr(SubmissionService, "get_by_id", _get_by_id)
+        # FakeUpload carries no bytes, and screening added photos is covered
+        # in test_submission_screening.py; these tests are about storage keys.
+        monkeypatch.setattr("app.services.submission_service.get_classifier", lambda: None)
         return SubmissionService(session), calls  # type: ignore[arg-type]
 
     return _build

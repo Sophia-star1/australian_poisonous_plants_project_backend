@@ -203,6 +203,29 @@ class Screening:
             }
         }
 
+    @classmethod
+    def from_record(cls, record: dict[str, Any] | None) -> "Screening | None":
+        """Read back what `as_record` wrote, or `None` if there is nothing usable.
+
+        `None` covers a submission that was never screened as well as a record
+        in some other shape, which is jsonb and so not guaranteed by anything.
+        """
+        if not record:
+            return None
+        try:
+            photos = record["screening"]["photos"]
+            return cls(
+                per_photo=[
+                    Verdict(
+                        decision=Decision(photo["decision"]),
+                        confidence=float(photo["plant_probability"]),
+                    )
+                    for photo in photos
+                ]
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
 
 class SubmissionService:
     """Create, list, and read plant observation submissions."""
@@ -563,6 +586,10 @@ class SubmissionService:
 
         Guarded the same way as `update_content`: the status is re-checked in
         the database rather than trusted from the row we read earlier.
+
+        The new photos are screened exactly as the original ones were, before
+        any of them is uploaded. Without that, the refusal on create was one
+        edit away from meaningless: submit a plant, then add anything at all.
         """
         guard = await self.db.execute(
             select(Submission.id).where(
@@ -571,6 +598,8 @@ class SubmissionService:
         )
         if guard.first() is None:
             return None
+
+        screening = await self.screen(photos)
 
         existing = await self.db.scalar(
             select(func.count(SubmissionImage.id)).where(
@@ -591,12 +620,37 @@ class SubmissionService:
                 )
                 has_primary = True
 
+            if screening is not None:
+                await self._fold_in_screening(submission_id, screening)
             await self.db.flush()
         except Exception:
             await self.discard_uploaded_photos()
             raise
         self.db.expire_all()
         return await self.get_by_id(submission_id)
+
+    async def _fold_in_screening(self, submission_id: UUID, added: Screening) -> None:
+        """Add the new photos' verdicts to the submission's stored one.
+
+        So a doubtful photo added later turns `ai_is_plant` false for the
+        reviewer, as it would have had it been sent with the rest.
+
+        Left alone when the submission was never screened (the classifier was
+        off when it was created): its earlier photos were not looked at, so the
+        new ones cannot speak for the whole submission.
+        """
+        stored = await self.db.scalar(
+            select(Submission.ai_top_matches).where(Submission.id == submission_id)
+        )
+        previous = Screening.from_record(stored)
+        if previous is None:
+            return
+        merged = Screening(per_photo=previous.per_photo + added.per_photo)
+        await self.db.execute(
+            update(Submission)
+            .where(Submission.id == submission_id)
+            .values(ai_is_plant=merged.is_plant, ai_top_matches=merged.as_record())
+        )
 
     async def delete_photo(
         self, submission_id: UUID, photo_id: UUID

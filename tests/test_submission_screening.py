@@ -25,6 +25,8 @@ from uuid import uuid4
 import pytest
 from httpx import AsyncClient
 from PIL import Image
+from sqlalchemy import Update
+from sqlalchemy.dialects import postgresql
 
 from app.config import settings
 from app.db.session import get_db
@@ -435,6 +437,113 @@ async def test_oversized_photos_are_caught_during_screening(
     assert response.status_code == 422
     assert "upload limit" in response.json()["message"]
     assert uploads == []
+
+
+# ── photos added to a pending submission ─────────────────────────────────────
+
+
+class _PendingSession(FakeSession):
+    """Enough AsyncSession for `add_photos` on a submission still pending.
+
+    `record` is the submission's stored `ai_top_matches`. Writes to the row
+    are captured in `updates`, as the values they set.
+    """
+
+    def __init__(self, record: dict[str, Any] | None) -> None:
+        super().__init__()
+        self.record = record
+        self.updates: list[dict[str, Any]] = []
+
+    async def execute(self, statement: Any) -> Any:
+        if isinstance(statement, Update):
+            self.updates.append(statement.compile(dialect=postgresql.dialect()).params)
+            return None
+
+        class _Pending:
+            def first(self) -> tuple[Any, ...]:
+                return (uuid4(),)
+
+        return _Pending()
+
+    async def scalar(self, statement: Any) -> Any:
+        # add_photos counts the photos already attached; folding in the new
+        # verdicts reads the stored record.
+        return 1 if "count(" in str(statement) else self.record
+
+    def expire_all(self) -> None:
+        return None
+
+
+def _record(*verdicts: tuple[Decision, float]) -> dict[str, Any]:
+    return svc.Screening(
+        per_photo=[Verdict(decision=d, confidence=c) for d, c in verdicts]
+    ).as_record()
+
+
+@pytest.fixture
+def adding(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A service adding photos to a pending submission with a given record."""
+
+    async def _get_by_id(self: Any, submission_id: Any) -> Any:
+        return object()
+
+    monkeypatch.setattr(svc.SubmissionService, "get_by_id", _get_by_id)
+
+    def _build(record: dict[str, Any] | None) -> tuple[svc.SubmissionService, _PendingSession]:
+        session = _PendingSession(record)
+        return svc.SubmissionService(session), session  # type: ignore[arg-type]
+
+    return _build
+
+
+@pytest.mark.asyncio
+async def test_a_non_plant_photo_cannot_be_added_later(
+    uploads: list[dict[str, Any]], verdicts: Any, adding: Any
+) -> None:
+    """Regression: added photos were never screened.
+
+    Submitting a plant and then adding anything at all walked straight past
+    the refusal on create.
+    """
+    verdicts((Decision.REJECT, 0.02))
+    service, session = adding(_record((Decision.ACCEPT, 0.98)))
+
+    with pytest.raises(svc.NotAPlantError, match="This photo does not appear"):
+        await service.add_photos(uuid4(), [_upload(_jpeg())])
+    assert uploads == [], "a refused photo must not reach the bucket"
+    assert session.added == [] and session.updates == []
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_photo_added_later_marks_the_submission(
+    uploads: list[dict[str, Any]], verdicts: Any, adding: Any
+) -> None:
+    """The stored verdict ends up as if the photo had been sent with the rest."""
+    verdicts((Decision.FLAG, 0.4))
+    service, session = adding(_record((Decision.ACCEPT, 0.98)))
+
+    await service.add_photos(uuid4(), [_upload(_jpeg())])
+
+    assert len(uploads) == 1
+    (written,) = session.updates
+    assert written["ai_is_plant"] is False
+    record = written["ai_top_matches"]["screening"]
+    assert [p["plant_probability"] for p in record["photos"]] == [0.98, 0.4]
+    assert record["plant_probability"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_photos_added_to_an_unscreened_submission_leave_it_unscreened(
+    uploads: list[dict[str, Any]], verdicts: Any, adding: Any
+) -> None:
+    """The earlier photos were never looked at, so no verdict is invented."""
+    verdicts((Decision.ACCEPT, 0.99))
+    service, session = adding(None)
+
+    await service.add_photos(uuid4(), [_upload(_jpeg())])
+
+    assert len(uploads) == 1
+    assert session.updates == []
 
 
 # ── bounded concurrency ──────────────────────────────────────────────────────
