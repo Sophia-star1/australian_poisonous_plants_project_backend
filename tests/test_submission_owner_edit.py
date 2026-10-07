@@ -20,6 +20,7 @@ from app.dependencies import get_current_active_user
 from app.main import app
 from app.models.user import User
 from app.schemas.submission import MAX_PHOTOS_PER_SUBMISSION, SubmissionContentUpdate
+from app.services.submission_service import NotAPlantError
 
 OWNER_EMAIL = "owner@example.com"
 SUBMISSION_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -351,6 +352,26 @@ async def test_adding_a_non_image_is_a_422(
     assert response.status_code == 422
     assert "unsupported type" in response.json()["message"]
     assert "added" not in calls
+
+
+@pytest.mark.asyncio
+async def test_a_photo_screening_refuses_is_a_422_when_adding(
+    async_client: AsyncClient, as_user: Any, stub_service: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same refusal, in the same words, as when creating the submission."""
+    as_user(_user())
+    stub_service(FakeSubmission(), photo_count=1)
+
+    async def _refuse(self: Any, submission_id: UUID, photos: Any) -> Any:
+        raise NotAPlantError([(1, 0.02)], total=1)
+
+    monkeypatch.setattr(api.SubmissionService, "add_photos", _refuse)
+
+    response = await async_client.post(
+        f"/api/v1/submissions/{SUBMISSION_ID}/photos", files=_photo_file()
+    )
+    assert response.status_code == 422
+    assert "does not appear to show a plant" in response.json()["message"]
 
 
 @pytest.mark.asyncio

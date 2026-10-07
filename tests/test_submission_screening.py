@@ -25,6 +25,8 @@ from uuid import uuid4
 import pytest
 from httpx import AsyncClient
 from PIL import Image
+from sqlalchemy import Update
+from sqlalchemy.dialects import postgresql
 
 from app.config import settings
 from app.db.session import get_db
@@ -210,7 +212,7 @@ async def test_a_refusal_costs_no_storage(
     Uploading and then deleting would work too, but it would pay for the
     bandwidth of exactly the traffic this exists to turn away.
     """
-    verdicts((Decision.REJECT, 0.01), (Decision.REJECT, 0.03))
+    verdicts((Decision.ACCEPT, 0.97), (Decision.REJECT, 0.03))
 
     response = await _post(async_client, _file("a.jpg"), _file("b.jpg"))
 
@@ -229,19 +231,76 @@ async def test_the_message_tells_the_contributor_what_to_do(
 
 
 @pytest.mark.asyncio
-async def test_one_bad_photo_among_several_is_not_a_refusal(
+async def test_a_near_miss_is_not_shown_as_a_percentage(
     async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
 ) -> None:
-    """Only a submission with nothing plant-like in it is turned away.
+    """Just under the 0.50 floor, "confidence 49%" reads as an argument to have."""
+    verdicts((Decision.REJECT, 0.49))
+    message = (await _post(async_client)).json()["message"]
+    assert "%" not in message
 
-    A contributor photographing a shrub from four angles may well catch one
-    frame of dirt. Refusing the lot would lose the other three, and the model
-    is not accurate enough to be given that authority — it puts 7 of this
-    project's own 104 curated plant photographs below its default cutoff.
+
+@pytest.mark.asyncio
+async def test_one_non_plant_photo_refuses_the_whole_submission(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """Regression: a plant photo used to carry a non-plant one through.
+
+    Only an all-negative set was refused, so a non-plant first photo followed
+    by a plant was accepted. Every photo has to pass on its own now.
     """
     verdicts((Decision.REJECT, 0.01), (Decision.ACCEPT, 0.98))
 
     response = await _post(async_client, _file("bad.jpg"), _file("good.jpg"))
+
+    assert response.status_code == 422
+    assert "Photo 1 of 2 does not appear to show a plant" in response.json()["message"]
+    assert uploads == [], "the plant photo is not kept either"
+
+
+@pytest.mark.asyncio
+async def test_the_position_of_the_bad_photo_does_not_matter(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """The primary photo is not special: a bad last photo refuses just the same."""
+    verdicts((Decision.ACCEPT, 0.98), (Decision.ACCEPT, 0.95), (Decision.REJECT, 0.04))
+
+    response = await _post(async_client, _file("a.jpg"), _file("b.jpg"), _file("c.jpg"))
+
+    assert response.status_code == 422
+    assert "Photo 3 of 3" in response.json()["message"]
+    assert uploads == []
+
+
+@pytest.mark.asyncio
+async def test_every_bad_photo_is_named_in_one_refusal(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """Screening finishes the set, so the contributor fixes it in one retry."""
+    seen = verdicts((Decision.REJECT, 0.02), (Decision.ACCEPT, 0.97), (Decision.REJECT, 0.05))
+
+    response = await _post(async_client, _file("a.jpg"), _file("b.jpg"), _file("c.jpg"))
+
+    assert response.status_code == 422
+    message = response.json()["message"]
+    assert "Photos 1 and 3 of 3 do not appear to show a plant" in message
+    assert "replace them" in message
+    assert len(seen) == 3, "every photo was scored before deciding"
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_photo_among_plants_is_not_a_refusal(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """Only a confident negative refuses; the middle band stays for review.
+
+    That band is where specimen shots and bark close-ups land. Refusing it
+    would turn honest contributors away, since the model puts 7 of this
+    project's own 104 curated plant photographs below its default cutoff.
+    """
+    verdicts((Decision.FLAG, 0.3), (Decision.ACCEPT, 0.98))
+
+    response = await _post(async_client, _file("bark.jpg"), _file("leaf.jpg"))
 
     assert response.status_code == 201
     assert len(uploads) == 2, "both photos are kept"
@@ -268,17 +327,36 @@ async def test_the_verdict_is_stored_on_the_submission(
     async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any, _isolated: Any
 ) -> None:
     """A reviewer needs the score, not just the boolean."""
-    verdicts((Decision.ACCEPT, 0.97), (Decision.FLAG, 0.42))
+    verdicts((Decision.ACCEPT, 0.97), (Decision.ACCEPT, 0.88))
 
     await _post(async_client, _file("a.jpg"), _file("b.jpg"))
 
     row = _isolated.added[0]
     assert row.ai_is_plant is True
     record = row.ai_top_matches["screening"]
-    assert record["plant_probability"] == 0.97, "the best photo speaks for the submission"
-    assert [p["plant_probability"] for p in record["photos"]] == [0.97, 0.42]
+    assert record["plant_probability"] == 0.88, "the weakest photo speaks for the submission"
+    assert [p["plant_probability"] for p in record["photos"]] == [0.97, 0.88]
     # ai_top_matches is jsonb; anything not JSON-native fails at the driver.
     assert json.loads(json.dumps(row.ai_top_matches)) == row.ai_top_matches
+
+
+@pytest.mark.asyncio
+async def test_one_uncertain_photo_marks_the_submission_for_the_reviewer(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any, _isolated: Any
+) -> None:
+    """Regression: a good photo used to vouch for an uncertain one.
+
+    `ai_is_plant` was true if any photo was a confident plant, so a doubtful
+    photo beside a clear one reached the reviewer marked as a plant.
+    """
+    verdicts((Decision.ACCEPT, 0.97), (Decision.FLAG, 0.42))
+
+    response = await _post(async_client, _file("a.jpg"), _file("b.jpg"))
+
+    assert response.status_code == 201
+    row = _isolated.added[0]
+    assert row.ai_is_plant is False
+    assert row.ai_top_matches["screening"]["plant_probability"] == 0.42
 
 
 @pytest.mark.asyncio
@@ -369,6 +447,113 @@ async def test_oversized_photos_are_caught_during_screening(
     assert response.status_code == 422
     assert "upload limit" in response.json()["message"]
     assert uploads == []
+
+
+# ── photos added to a pending submission ─────────────────────────────────────
+
+
+class _PendingSession(FakeSession):
+    """Enough AsyncSession for `add_photos` on a submission still pending.
+
+    `record` is the submission's stored `ai_top_matches`. Writes to the row
+    are captured in `updates`, as the values they set.
+    """
+
+    def __init__(self, record: dict[str, Any] | None) -> None:
+        super().__init__()
+        self.record = record
+        self.updates: list[dict[str, Any]] = []
+
+    async def execute(self, statement: Any) -> Any:
+        if isinstance(statement, Update):
+            self.updates.append(statement.compile(dialect=postgresql.dialect()).params)
+            return None
+
+        class _Pending:
+            def first(self) -> tuple[Any, ...]:
+                return (uuid4(),)
+
+        return _Pending()
+
+    async def scalar(self, statement: Any) -> Any:
+        # add_photos counts the photos already attached; folding in the new
+        # verdicts reads the stored record.
+        return 1 if "count(" in str(statement) else self.record
+
+    def expire_all(self) -> None:
+        return None
+
+
+def _record(*verdicts: tuple[Decision, float]) -> dict[str, Any]:
+    return svc.Screening(
+        per_photo=[Verdict(decision=d, confidence=c) for d, c in verdicts]
+    ).as_record()
+
+
+@pytest.fixture
+def adding(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A service adding photos to a pending submission with a given record."""
+
+    async def _get_by_id(self: Any, submission_id: Any) -> Any:
+        return object()
+
+    monkeypatch.setattr(svc.SubmissionService, "get_by_id", _get_by_id)
+
+    def _build(record: dict[str, Any] | None) -> tuple[svc.SubmissionService, _PendingSession]:
+        session = _PendingSession(record)
+        return svc.SubmissionService(session), session  # type: ignore[arg-type]
+
+    return _build
+
+
+@pytest.mark.asyncio
+async def test_a_non_plant_photo_cannot_be_added_later(
+    uploads: list[dict[str, Any]], verdicts: Any, adding: Any
+) -> None:
+    """Regression: added photos were never screened.
+
+    Submitting a plant and then adding anything at all walked straight past
+    the refusal on create.
+    """
+    verdicts((Decision.REJECT, 0.02))
+    service, session = adding(_record((Decision.ACCEPT, 0.98)))
+
+    with pytest.raises(svc.NotAPlantError, match="This photo does not appear"):
+        await service.add_photos(uuid4(), [_upload(_jpeg())])
+    assert uploads == [], "a refused photo must not reach the bucket"
+    assert session.added == [] and session.updates == []
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_photo_added_later_marks_the_submission(
+    uploads: list[dict[str, Any]], verdicts: Any, adding: Any
+) -> None:
+    """The stored verdict ends up as if the photo had been sent with the rest."""
+    verdicts((Decision.FLAG, 0.4))
+    service, session = adding(_record((Decision.ACCEPT, 0.98)))
+
+    await service.add_photos(uuid4(), [_upload(_jpeg())])
+
+    assert len(uploads) == 1
+    (written,) = session.updates
+    assert written["ai_is_plant"] is False
+    record = written["ai_top_matches"]["screening"]
+    assert [p["plant_probability"] for p in record["photos"]] == [0.98, 0.4]
+    assert record["plant_probability"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_photos_added_to_an_unscreened_submission_leave_it_unscreened(
+    uploads: list[dict[str, Any]], verdicts: Any, adding: Any
+) -> None:
+    """The earlier photos were never looked at, so no verdict is invented."""
+    verdicts((Decision.ACCEPT, 0.99))
+    service, session = adding(None)
+
+    await service.add_photos(uuid4(), [_upload(_jpeg())])
+
+    assert len(uploads) == 1
+    assert session.updates == []
 
 
 # ── bounded concurrency ──────────────────────────────────────────────────────

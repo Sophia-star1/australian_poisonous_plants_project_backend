@@ -139,37 +139,95 @@ def _unknown_defaults() -> dict[str, Any]:
 
 
 class NotAPlantError(ValueError):
-    """Raised when screening is confident that no photo shows a plant."""
+    """Raised when screening is confident that a photo does not show a plant.
 
-    def __init__(self, probabilities: list[float]) -> None:
-        best = max(probabilities) if probabilities else 0.0
+    `rejected` pairs the 1-based position of each such photo, in the order it
+    was sent, with its plant probability. The message names the positions, so
+    a contributor with several photos knows which one to replace instead of
+    guessing.
+
+    The probability stays out of the message. With the refusal floor at 0.50
+    a refused photo can read "confidence 49%", which a contributor takes as a
+    near miss to argue with rather than a photo to replace.
+    """
+
+    def __init__(self, rejected: list[tuple[int, float]], total: int) -> None:
+        positions = [position for position, _ in rejected]
+        if total == 1:
+            subject = "This photo does not"
+        elif len(positions) == 1:
+            subject = f"Photo {positions[0]} of {total} does not"
+        else:
+            listed = ", ".join(map(str, positions[:-1])) + f" and {positions[-1]}"
+            subject = f"Photos {listed} of {total} do not"
+        if total == 1:
+            action, tail = "Please upload", ""
+        else:
+            pronoun = "it" if len(rejected) == 1 else "them"
+            action = f"Every photo must show the plant: replace {pronoun} with"
+            tail = f" — or remove {pronoun}"
         super().__init__(
-            "None of the uploaded photos appear to show a plant "
-            f"(highest confidence {best:.0%}). Please upload a photo of the "
-            "plant itself — a leaf, flower, fruit, bark or the whole plant."
+            f"{subject} appear to show a plant. {action} a photo of the "
+            f"plant itself — a leaf, flower, fruit, bark or the whole plant{tail}."
         )
-        self.probabilities = probabilities
+        self.rejected = rejected
+        self.probabilities = [probability for _, probability in rejected]
 
 
 @dataclass(frozen=True, slots=True)
 class Screening:
-    """What screening concluded about a whole submission."""
+    """What screening concluded about a whole submission.
 
-    is_plant: bool
+    The weakest photo speaks for the submission, matching the refusal rule
+    that every photo must show the plant. Reporting the best photo instead
+    marked a submission as a plant on the strength of one good frame, hiding
+    exactly the uncertain photo a reviewer should be pointed at.
+    """
+
     per_photo: list[Verdict]
 
     @property
-    def best(self) -> float:
-        return max((v.confidence for v in self.per_photo), default=0.0)
+    def is_plant(self) -> bool:
+        """`ai_is_plant`: true only when every photo is a confident plant."""
+        return bool(self.per_photo) and all(
+            v.decision is Decision.ACCEPT for v in self.per_photo
+        )
+
+    @property
+    def weakest(self) -> float:
+        return min((v.confidence for v in self.per_photo), default=0.0)
 
     def as_record(self) -> dict[str, Any]:
         """Shape written to `submissions.ai_top_matches`."""
         return {
             "screening": {
-                "plant_probability": self.best,
+                "plant_probability": self.weakest,
                 "photos": [v.as_dict() for v in self.per_photo],
             }
         }
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any] | None) -> "Screening | None":
+        """Read back what `as_record` wrote, or `None` if there is nothing usable.
+
+        `None` covers a submission that was never screened as well as a record
+        in some other shape, which is jsonb and so not guaranteed by anything.
+        """
+        if not record:
+            return None
+        try:
+            photos = record["screening"]["photos"]
+            return cls(
+                per_photo=[
+                    Verdict(
+                        decision=Decision(photo["decision"]),
+                        confidence=float(photo["plant_probability"]),
+                    )
+                    for photo in photos
+                ]
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
 
 class SubmissionService:
@@ -195,13 +253,19 @@ class SubmissionService:
         classifier that cannot load must not take the upload path down with
         it.
 
-        The submission is refused only when *every* photo is a confident
-        negative. Refusing on any single one would be harsher than the model
-        earns: it turns away 7 of the 104 photographs in this project's own
-        curated library at its default cutoff, and one stray frame among
-        several is far more likely to be an honest mistake than an abuse. A
-        photo in the uncertain band still goes through, marked for the
-        reviewer rather than bounced back at the contributor.
+        The submission is refused when *any* photo is a confident negative:
+        every photograph in it must show the plant. Each photo is judged
+        exactly as it would be if it were sent alone, so adding a plant photo
+        can no longer carry a non-plant one through — which is what refusing
+        only an all-negative set allowed. A photo in the uncertain band still
+        goes through, marked for the reviewer rather than bounced back at the
+        contributor: that band is where specimen shots and bark close-ups
+        land, and the model puts 7 of the 104 photographs in this project's
+        own curated library below its default cutoff.
+
+        Every photo is scored before deciding rather than stopping at the
+        first refusal, so the message can name all the photos to replace in
+        one round trip instead of one per retry.
 
         Each photo is read, scored, then released, so peak memory is one
         photo rather than all ten. `rewind` leaves the handle ready for the
@@ -225,13 +289,15 @@ class SubmissionService:
                 # instance is serving.
                 verdicts.append(await run_in_threadpool(classifier.classify, data))
 
-        if all(v.decision is Decision.REJECT for v in verdicts):
-            raise NotAPlantError([v.confidence for v in verdicts])
+        rejected = [
+            (position, v.confidence)
+            for position, v in enumerate(verdicts, start=1)
+            if v.decision is Decision.REJECT
+        ]
+        if rejected:
+            raise NotAPlantError(rejected, total=len(verdicts))
 
-        return Screening(
-            is_plant=any(v.decision is Decision.ACCEPT for v in verdicts),
-            per_photo=verdicts,
-        )
+        return Screening(per_photo=verdicts)
 
     async def _store_photo(self, photo: UploadFile, submission_id: UUID) -> str:
         """Upload one photo and return the URL to record against the row.
@@ -523,6 +589,10 @@ class SubmissionService:
 
         Guarded the same way as `update_content`: the status is re-checked in
         the database rather than trusted from the row we read earlier.
+
+        The new photos are screened exactly as the original ones were, before
+        any of them is uploaded. Without that, the refusal on create was one
+        edit away from meaningless: submit a plant, then add anything at all.
         """
         guard = await self.db.execute(
             select(Submission.id).where(
@@ -531,6 +601,8 @@ class SubmissionService:
         )
         if guard.first() is None:
             return None
+
+        screening = await self.screen(photos)
 
         existing = await self.db.scalar(
             select(func.count(SubmissionImage.id)).where(
@@ -551,12 +623,37 @@ class SubmissionService:
                 )
                 has_primary = True
 
+            if screening is not None:
+                await self._fold_in_screening(submission_id, screening)
             await self.db.flush()
         except Exception:
             await self.discard_uploaded_photos()
             raise
         self.db.expire_all()
         return await self.get_by_id(submission_id)
+
+    async def _fold_in_screening(self, submission_id: UUID, added: Screening) -> None:
+        """Add the new photos' verdicts to the submission's stored one.
+
+        So a doubtful photo added later turns `ai_is_plant` false for the
+        reviewer, as it would have had it been sent with the rest.
+
+        Left alone when the submission was never screened (the classifier was
+        off when it was created): its earlier photos were not looked at, so the
+        new ones cannot speak for the whole submission.
+        """
+        stored = await self.db.scalar(
+            select(Submission.ai_top_matches).where(Submission.id == submission_id)
+        )
+        previous = Screening.from_record(stored)
+        if previous is None:
+            return
+        merged = Screening(per_photo=previous.per_photo + added.per_photo)
+        await self.db.execute(
+            update(Submission)
+            .where(Submission.id == submission_id)
+            .values(ai_is_plant=merged.is_plant, ai_top_matches=merged.as_record())
+        )
 
     async def delete_photo(
         self, submission_id: UUID, photo_id: UUID
