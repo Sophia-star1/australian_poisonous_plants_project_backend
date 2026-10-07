@@ -231,6 +231,16 @@ async def test_the_message_tells_the_contributor_what_to_do(
 
 
 @pytest.mark.asyncio
+async def test_a_near_miss_is_not_shown_as_a_percentage(
+    async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
+) -> None:
+    """Just under the 0.50 floor, "confidence 49%" reads as an argument to have."""
+    verdicts((Decision.REJECT, 0.49))
+    message = (await _post(async_client)).json()["message"]
+    assert "%" not in message
+
+
+@pytest.mark.asyncio
 async def test_one_non_plant_photo_refuses_the_whole_submission(
     async_client: AsyncClient, uploads: list[dict[str, Any]], verdicts: Any
 ) -> None:

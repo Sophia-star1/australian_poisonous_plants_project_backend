@@ -145,6 +145,10 @@ class NotAPlantError(ValueError):
     was sent, with its plant probability. The message names the positions, so
     a contributor with several photos knows which one to replace instead of
     guessing.
+
+    The probability stays out of the message. With the refusal floor at 0.50
+    a refused photo can read "confidence 49%", which a contributor takes as a
+    near miss to argue with rather than a photo to replace.
     """
 
     def __init__(self, rejected: list[tuple[int, float]], total: int) -> None:
@@ -156,7 +160,6 @@ class NotAPlantError(ValueError):
         else:
             listed = ", ".join(map(str, positions[:-1])) + f" and {positions[-1]}"
             subject = f"Photos {listed} of {total} do not"
-        confidence = f" (confidence {rejected[0][1]:.0%})" if len(rejected) == 1 else ""
         if total == 1:
             action, tail = "Please upload", ""
         else:
@@ -164,7 +167,7 @@ class NotAPlantError(ValueError):
             action = f"Every photo must show the plant: replace {pronoun} with"
             tail = f" — or remove {pronoun}"
         super().__init__(
-            f"{subject} appear to show a plant{confidence}. {action} a photo of the "
+            f"{subject} appear to show a plant. {action} a photo of the "
             f"plant itself — a leaf, flower, fruit, bark or the whole plant{tail}."
         )
         self.rejected = rejected
