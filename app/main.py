@@ -93,8 +93,10 @@ def create_app() -> FastAPI:
     application.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
     # RequestValidationError, not the bare 422 status: FastAPI raises the
     # former for body/query validation and it otherwise bypasses the envelope.
+    # A status-code handler would also be wrong: Starlette consults those
+    # before exception classes, so a 422 `UnprocessableError` would land here
+    # and reach the client as "422: <detail>".
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
-    application.add_exception_handler(422, validation_exception_handler)
     # Last resort: keeps the {code, message, data} envelope intact for bugs.
     application.add_exception_handler(Exception, unhandled_exception_handler)
 
