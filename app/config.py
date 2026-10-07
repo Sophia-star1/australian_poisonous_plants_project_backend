@@ -83,13 +83,15 @@ class Settings(BaseSettings):
     #: Off switch. The classifier also stays out of the way on its own when
     #: the weights are missing, so a checkout without them still boots.
     PLANT_CLASSIFIER_ENABLED: bool = True
-    #: Below this the upload is refused. Deliberately far under the model's
-    #: own 0.7 cutoff: measured against this project's curated library — 104
-    #: photographs, all genuinely plants — 0.7 turns away 7 of them, while
-    #: 0.10 turns away 1. The rejected ones are specimen shots, bark close-ups
-    #: and non-green plant parts, which is the sort of photograph this
-    #: database exists to collect.
-    PLANT_REJECT_BELOW: float = 0.10
+    #: Below this the upload is refused. Raised from 0.10 because ordinary
+    #: non-plants landed above that floor and were accepted: screenshots
+    #: score 0.24–0.49, a blank frame about 0.32. The cost is honest photos:
+    #: against this project's curated library — 104 photographs, all
+    #: genuinely plants — 0.5 turns away 6 of them (0.10 turned away 1, the
+    #: model's own 0.7 cutoff 7). Those are specimen shots, bark close-ups and
+    #: non-green plant parts, and since every photo in a submission must pass,
+    #: the chance of refusing an honest submission grows with its photo count.
+    PLANT_REJECT_BELOW: float = 0.50
     #: At or above this the photo counts as a plant. Anything in between is
     #: accepted but marked for the reviewer rather than refused.
     PLANT_ACCEPT_AT: float = 0.70

@@ -105,6 +105,12 @@ class PlantDetail(PlantSummary):
     toxic_to_animals: list[str]
 
 
+class PlantCount(BaseModel):
+    """Served by `GET /plants/count`."""
+
+    total: int = Field(description="Number of plants in the library.")
+
+
 class PlantSearchQuery(BaseModel):
     """Query-string container documenting the search endpoint."""
 

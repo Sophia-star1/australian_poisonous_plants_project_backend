@@ -134,6 +134,38 @@ async def _commit_uploads(db: AsyncSession, service: SubmissionService) -> None:
         raise
 
 
+#: What screening raises for a photo it will not let through.
+_SCREENING_REFUSALS = (NotAPlantError, ImageTooLargeError, UndecodableImageError)
+
+
+def _refused_by_screening(
+    exc: NotAPlantError | ImageTooLargeError | UndecodableImageError,
+) -> UnprocessableError:
+    """The 422 for a photo screening refused.
+
+    Shared by creating a submission and adding photos to one, so the same
+    photo is refused in the same words on either path.
+    """
+    if isinstance(exc, ImageTooLargeError):
+        # The header declares more pixels than screening can decode safely.
+        # A 17 KB file can claim 144 megapixels; decoding it is the attack.
+        return UnprocessableError(
+            f"One of the photos is too large to process ({exc}). Export it at a "
+            "smaller size, or as a JPEG, and try again."
+        )
+    if isinstance(exc, UndecodableImageError):
+        # The declared content type said image; the bytes disagree. Caught
+        # here only because screening is the first thing that tries to decode
+        # them — worth refusing either way, since a reviewer cannot look at it.
+        return UnprocessableError(
+            "One of the files is not a readable image. Re-export it and try again."
+        )
+    # Screening is confident at least one photo does not show a plant. Said
+    # plainly, naming the photo, so the contributor can fix it and retry
+    # rather than face a generic rejection they cannot act on.
+    return UnprocessableError(str(exc))
+
+
 def _is_owner(submission: Submission, user: User) -> bool:
     """Ownership is by contributor email — the schema has no user FK."""
     return submission.contributor_email.lower() == user.email.lower()
@@ -190,11 +222,13 @@ async def create_submission(
     `contributor_email` in the form are ignored, and the submission then
     appears in `GET /submissions/me` and can be edited while it is pending.
 
-    Every photograph is screened for whether it shows a plant. A submission
-    where none of them do is refused with an explanation; an uncertain one is
-    accepted and marked for the reviewer. The verdict is returned in
+    Every photograph is screened for whether it shows a plant, and every one
+    of them must: if any photo clearly does not, the whole submission is
+    refused with a message naming that photo by position. An uncertain photo
+    is accepted and marked for the reviewer. The verdict is returned in
     `ai_is_plant` and `ai_top_matches`, and is `null` when screening was
-    unavailable.
+    unavailable. `ai_is_plant` is true only when every photo is a confident
+    plant, and `plant_probability` is that of the weakest photo.
 
     Photographs are kept as the record of what was submitted, and copied into
     the plant library only if a reviewer approves.
@@ -202,8 +236,8 @@ async def create_submission(
     Errors:
 
     * `422` — unsupported file type, more than ten photographs, a file that is
-      not a readable image, one that exceeds the size limit, or nothing among
-      them that appears to be a plant.
+      not a readable image, one that exceeds the size limit, or a photo that
+      does not appear to be a plant.
     """
     _validate_photos(photos)
 
@@ -232,25 +266,8 @@ async def create_submission(
     service = SubmissionService(db)
     try:
         row = await service.create(payload=payload, photos=photos)
-    except NotAPlantError as exc:
-        # Screening is confident none of the photos show a plant. Said plainly
-        # so the contributor can fix it and retry, rather than as a generic
-        # rejection they cannot act on.
-        raise UnprocessableError(str(exc)) from exc
-    except ImageTooLargeError as exc:
-        # The header declares more pixels than screening can decode safely.
-        # A 17 KB file can claim 144 megapixels; decoding it is the attack.
-        raise UnprocessableError(
-            f"One of the photos is too large to process ({exc}). Export it at a "
-            "smaller size, or as a JPEG, and try again."
-        ) from exc
-    except UndecodableImageError as exc:
-        # The declared content type said image; the bytes disagree. Caught
-        # here only because screening is the first thing that tries to decode
-        # them — worth refusing either way, since a reviewer cannot look at it.
-        raise UnprocessableError(
-            "One of the files is not a readable image. Re-export it and try again."
-        ) from exc
+    except _SCREENING_REFUSALS as exc:
+        raise _refused_by_screening(exc) from exc
     except StorageError as exc:
         # Surface the storage failure instead of writing a submission whose
         # photos do not exist. The session rolls back with the request, and
@@ -365,17 +382,21 @@ async def add_submission_photos(
     """Attach more photographs to your own pending submission.
 
     Same rules as the original upload: JPEG, PNG or WebP, and ten photographs
-    per submission in total. Returns the whole submission, including a new
-    `content_version` — any review in progress against the old one will now be
-    refused, which is the point.
+    per submission in total. Every new photo is screened like the original
+    ones, and if any of them clearly does not show a plant none is added; the
+    message names it by its position among the photos in this request.
+    Returns the whole submission, including a new `content_version` — any
+    review in progress against the old one will now be refused, which is the
+    point.
 
     Errors:
 
     * `403` — an administrator adding to somebody else's submission.
     * `404` — no such submission, or it is not yours.
     * `409` — already approved or rejected.
-    * `422` — unsupported type, a file over the size limit, or the total would
-      exceed ten.
+    * `422` — unsupported type, a file over the size limit, a file that is not
+      a readable image, a photo that does not appear to be a plant, or the
+      total would exceed ten.
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
@@ -393,6 +414,8 @@ async def add_submission_photos(
 
     try:
         updated = await service.add_photos(submission_id, photos)
+    except _SCREENING_REFUSALS as exc:
+        raise _refused_by_screening(exc) from exc
     except StorageError as exc:
         # An oversized or empty file, or storage being unavailable. Caught on
         # upload but not here, so the same mistake was a 422 when creating a
