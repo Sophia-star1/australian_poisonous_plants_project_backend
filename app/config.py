@@ -18,6 +18,8 @@ class Settings(BaseSettings):
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_S3_ENDPOINT_URL",
+        "SMTP_HOST",
+        "SMTP_USERNAME",
         mode="after",
     )
     @classmethod
@@ -41,6 +43,17 @@ class Settings(BaseSettings):
         every token signed with the untrimmed value the moment this deploys.
         """
         return value.strip()
+
+    @field_validator("SMTP_PASSWORD", mode="after")
+    @classmethod
+    def _strip_trailing_newline(cls, value: str) -> str:
+        """Drop the newline Secret Manager tends to keep, and nothing else.
+
+        Same failure as above — a password loaded with a trailing newline
+        fails to log in — but unlike a key or a URL, a password may begin or
+        end with a space on purpose, so only line endings are removed.
+        """
+        return value.rstrip("\r\n")
 
     # --- Core ---
     APP_NAME: str = "apl-backend"
@@ -134,9 +147,21 @@ class Settings(BaseSettings):
         return value
 
     # --- Email (optional) ---
-    #: Resend API key. Without it the service still runs and logs what it
-    #: would have sent, so a checkout with no credentials behaves like
-    #: production minus the delivery.
+    #: SMTP submission server, e.g. the domain's own mailbox provider. When
+    #: set, mail goes out through it and Resend is not used. Without either,
+    #: the service still runs and logs what it would have sent, so a checkout
+    #: with no credentials behaves like production minus the delivery.
+    SMTP_HOST: str = ""
+    #: 587 with STARTTLS, or 465 for implicit TLS. Cloud Run blocks outbound
+    #: port 25, not the submission ports.
+    SMTP_PORT: int = 587
+    #: The mailbox to log in as. Use the same address as EMAIL_FROM: mailbox
+    #: providers refuse, or mark as spoofed, mail sent "from" someone else.
+    SMTP_USERNAME: str = ""
+    #: The mailbox password. Secret Manager only; never an env var in
+    #: cloudbuild.yaml or a committed file.
+    SMTP_PASSWORD: str = ""
+    #: Resend API key, used when SMTP_HOST is not set.
     RESEND_API_KEY: str = ""
     #: Sender address. `onboarding@resend.dev` is Resend's shared test sender:
     #: no domain verification needed, but it only delivers to the address that
@@ -147,9 +172,23 @@ class Settings(BaseSettings):
     EMAIL_REPLY_TO: str = ""
 
     @property
+    def email_transport(self) -> str:
+        """`smtp` when SMTP_HOST is set, otherwise `resend`.
+
+        Decided by SMTP_HOST alone, so a half-configured SMTP setup reports
+        itself as disabled rather than quietly falling back to Resend with a
+        sender Resend has never verified.
+        """
+        return "smtp" if self.SMTP_HOST else "resend"
+
+    @property
     def email_enabled(self) -> bool:
         """Whether outgoing mail can actually be delivered."""
-        return bool(self.RESEND_API_KEY and self.EMAIL_FROM)
+        if not self.EMAIL_FROM:
+            return False
+        if self.email_transport == "smtp":
+            return bool(self.SMTP_USERNAME and self.SMTP_PASSWORD)
+        return bool(self.RESEND_API_KEY)
 
     # --- CORS ---
     ALLOWED_ORIGINS: list[str] = [
