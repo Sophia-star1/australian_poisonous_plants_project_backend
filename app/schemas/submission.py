@@ -370,6 +370,51 @@ class PlantIdentification(BaseModel):
         return self
 
 
+class PlantUpdate(BaseModel):
+    """Admin correction of a published plant: send only what changes.
+
+    The same fields, and the same cleaning, as `PlantIdentification`:
+
+    * a field left out is unchanged;
+    * a field sent blank or `null` goes back to the dataset's "not recorded"
+      value, `'Unknown'` — except `botanical_name`, which cannot be cleared;
+    * the three objects are merged key by key into what is stored, so
+      `{"toxicity_by_species": {"dogs": "Toxic"}}` changes dogs and nothing
+      else, and a key sent blank resets just that key.
+    """
+
+    model_config = _REVIEWER_INPUT
+
+    botanical_name: str | None = Field(None, min_length=1, max_length=255)
+    family_name: str | None = None
+    common_names: list[str] | None = None
+    origin_status: str | None = None
+    distribution: list[str] | None = None
+    habitat: str | None = None
+    seasonality_of_toxicity: str | None = None
+    toxic_parts: list[str] | None = None
+    toxicity_by_species: ToxicityBySpecies | None = None
+    lethality: str | None = None
+    toxin_profile: ToxinProfile | None = None
+    health_effects: str | None = None
+    morphological_attributes: MorphologicalAttributes | None = None
+
+    @field_validator("botanical_name")
+    @classmethod
+    def _name_cannot_be_cleared(cls, value: str | None) -> str | None:
+        """Every row needs a name; omit it to keep the current one."""
+        if value is None:
+            raise ValueError("cannot be cleared; omit it to keep the current name")
+        return value
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> "PlantUpdate":
+        if not self.model_fields_set:
+            raise ValueError("Nothing to change: send at least one field.")
+        _clear_blanks(self)
+        return self
+
+
 class SubmissionUpdate(BaseModel):
     """Admin action: approve or reject a submission.
 

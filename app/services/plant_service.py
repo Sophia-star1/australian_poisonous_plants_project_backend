@@ -9,6 +9,9 @@ Everything the mobile screens need lives here:
   toxic parts, distribution, health effects, the toxicity profile and the
   toxin profile. Supports optional field-scoped search via `fields`.
 
+And the two admin writes: `update_plant` corrects an entry, `delete_plant`
+removes one.
+
 ## Searching the jsonb columns is not a text cast
 
 `toxicity_by_species` and `toxin_profile` are jsonb, and the obvious
@@ -39,9 +42,15 @@ from sqlalchemy import ColumnExpressionArgument, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.db.like import contains_pattern
-from app.models.plant import TOXIC, TOXICITY_SPECIES, Plant
+from app.models.plant import TOXIC, TOXICITY_SPECIES, Plant, unknown_defaults
 from app.schemas.plant import SEARCHABLE_FIELDS
+from app.schemas.submission import PlantUpdate
+from app.services.storage_service import StorageService
+
+#: The jsonb columns `update_plant` merges key by key rather than replaces.
+_MERGED_OBJECTS = ("toxicity_by_species", "toxin_profile", "morphological_attributes")
 
 SEARCH_DEFAULT_LIMIT = 25
 
@@ -202,6 +211,85 @@ class PlantService:
         total = await self.db.scalar(select(func.count()).select_from(Plant))
         return int(total or 0)
 
+    async def update_plant(self, plant_id: int, changes: PlantUpdate) -> Plant | None:
+        """Apply an admin correction; `None` if there is no such plant.
+
+        Only the fields the request sent are touched (`exclude_unset`). A field
+        sent blank arrives as `None` and goes back to the dataset's default,
+        `'Unknown'`, the same value an approval fills a gap with. The jsonb
+        objects are merged key by key, so correcting one species does not wipe
+        the other ten. A rename to a name another plant already has is
+        refused, as an approval would be.
+        """
+        plant = await self.db.get(Plant, plant_id)
+        if plant is None:
+            return None
+
+        sent = changes.model_dump(exclude_unset=True)
+        defaults = unknown_defaults()
+
+        name = sent.pop("botanical_name", None)
+        if name is not None:
+            duplicate = await find_plant_named(self.db, name, exclude_id=plant_id)
+            if duplicate is not None:
+                raise DuplicatePlantError(name, duplicate)
+            plant.botanical_name = name
+
+        for field, value in sent.items():
+            if field in _MERGED_OBJECTS and value is not None:
+                merged = dict(getattr(plant, field) or {})
+                for key, entry in value.items():
+                    if entry is not None:
+                        merged[key] = entry
+                    elif key in defaults[field]:
+                        merged[key] = defaults[field][key]
+                    else:
+                        # A key the dataset does not define (morphology is
+                        # open): clearing it removes it.
+                        merged.pop(key, None)
+                # A new object, not an in-place edit: SQLAlchemy only notices
+                # a jsonb change when the attribute is reassigned.
+                setattr(plant, field, merged)
+            else:
+                setattr(plant, field, value if value is not None else defaults[field])
+
+        await self.db.flush()
+        return plant
+
+    async def delete_plant(self, plant_id: int) -> list[str] | None:
+        """Delete a plant and its image rows; `None` if there is no such plant.
+
+        Returns the image URLs the rows held, so the caller can remove the
+        files once the deletion has committed — before that, a rollback would
+        leave rows pointing at photos that are gone.
+        """
+        plant = await self.db.get(Plant, plant_id)
+        if plant is None:
+            return None
+        urls = [image.image_url for image in plant.images]
+        # `Plant.images` cascades, so the image rows go with it.
+        await self.db.delete(plant)
+        await self.db.flush()
+        return urls
+
+    async def delete_photo_files(self, urls: list[str]) -> list[str]:
+        """Remove the files behind `urls`; returns the ones left in place.
+
+        Only files in this project's plant bucket are touched. Anything else —
+        another bucket, another host — is reported back rather than guessed at.
+        Never raises: the database change it cleans up after is already done.
+        """
+        storage = StorageService()
+        kept: list[str] = []
+        for url in urls:
+            key = storage.key_in_bucket(url, settings.SUPABASE_PLANT_BUCKET)
+            deleted = key is not None and await storage.delete_file(
+                key, bucket=settings.SUPABASE_PLANT_BUCKET
+            )
+            if not deleted:
+                kept.append(url)
+        return kept
+
     async def get_plant(self, plant_id: int) -> Plant | None:
         stmt = (
             select(Plant)
@@ -257,4 +345,10 @@ class PlantService:
         return rows[: max(1, min(limit, 200))]
 
 
-__all__ = ["PlantService", "SEARCH_DEFAULT_LIMIT", "SEARCHABLE_FIELDS"]
+__all__ = [
+    "DuplicatePlantError",
+    "PlantService",
+    "SEARCH_DEFAULT_LIMIT",
+    "SEARCHABLE_FIELDS",
+    "find_plant_named",
+]
