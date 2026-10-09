@@ -39,14 +39,11 @@ from sqlalchemy import ColumnExpressionArgument, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.db.like import contains_pattern
 from app.models.plant import TOXIC, TOXICITY_SPECIES, Plant
 from app.schemas.plant import SEARCHABLE_FIELDS
 
 SEARCH_DEFAULT_LIMIT = 25
-
-
-def _escape_ilike(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _array_ilike(col: Any, like: str) -> ColumnExpressionArgument[bool]:
@@ -206,8 +203,7 @@ class PlantService:
         if not query:
             return []
 
-        safe = _escape_ilike(query)
-        like = f"%{safe}%"
+        like = contains_pattern(query)
 
         all_filters = _build_search_filters(like)
 

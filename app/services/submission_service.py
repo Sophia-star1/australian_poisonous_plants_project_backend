@@ -26,6 +26,7 @@ from sqlalchemy.orm import selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.db.like import LIKE_ESCAPE, contains_pattern
 from app.ml.classifier import Decision, Verdict, get_classifier
 from app.models.plant import TOXICITY_SPECIES, UNKNOWN, Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
@@ -421,13 +422,19 @@ class SubmissionService:
         conditions = []
         if filters.status:
             conditions.append(Submission.status == filters.status)
+        # Escaped, so `_` and `%` in what the reviewer typed match themselves:
+        # an email filter for "first_last" otherwise also matched "firstxlast".
         if filters.contributor_name:
             conditions.append(
-                Submission.contributor_name.ilike(f"%{filters.contributor_name}%")
+                Submission.contributor_name.ilike(
+                    contains_pattern(filters.contributor_name), escape=LIKE_ESCAPE
+                )
             )
         if filters.contributor_email:
             conditions.append(
-                Submission.contributor_email.ilike(f"%{filters.contributor_email}%")
+                Submission.contributor_email.ilike(
+                    contains_pattern(filters.contributor_email), escape=LIKE_ESCAPE
+                )
             )
 
         total = await self.db.scalar(
