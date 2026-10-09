@@ -8,9 +8,10 @@ administrator meant hand-writing SQL against the production database.
 * `GET   /users/{id}`        — admin: single user.
 * `PATCH /users/{id}/role`   — admin: change a role.
 
-And for every signed-in user, their own profile picture:
+And for every signed-in user, their own profile:
 
-* `PUT    /users/me/avatar`  — upload or replace it.
+* `PATCH  /users/me`         — change your display name.
+* `PUT    /users/me/avatar`  — upload or replace the profile picture.
 * `DELETE /users/me/avatar`  — remove it.
 """
 
@@ -25,7 +26,7 @@ from app.ml.classifier import ImageTooLargeError, UndecodableImageError
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
 from app.schemas.role import UserRole
-from app.schemas.user import UserOut, UserRoleUpdate
+from app.schemas.user import UserNameUpdate, UserOut, UserRoleUpdate
 from app.services.avatar_service import AvatarService
 from app.services.storage_service import StorageError
 from app.services.user_service import UserService
@@ -113,6 +114,33 @@ async def update_user_role(
     updated = await service.set_role(user_id, payload.role)
     if updated is None:  # pragma: no cover - the row was deleted mid-request
         raise NotFoundError(f"User {user_id} not found.")
+    return ApiResponse.success(data=UserOut.model_validate(updated))
+
+
+@router.patch("/me", response_model=ApiResponse[UserOut])
+async def update_my_name(
+    payload: UserNameUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> ApiResponse[UserOut]:
+    """Change your own display name.
+
+    Shows on the profile screen and becomes the `contributor_name` on
+    submissions made while signed in. Submissions already recorded keep the
+    name they were made with — each stores its own copy, so renaming does
+    not rewrite history.
+
+    Errors:
+
+    * `401` — not signed in.
+    * `422` — a blank name, one longer than 255 characters, or an unknown
+      field. `extra="forbid"` is deliberate: silently ignoring a stray
+      `email`, `password` or `role` here would look like a security hole
+      even when nothing is stored.
+    """
+    updated = await UserService(db).set_full_name(current_user.id, payload.full_name)
+    if updated is None:  # pragma: no cover - the account cannot vanish mid-request
+        raise NotFoundError("Account not found.")
     return ApiResponse.success(data=UserOut.model_validate(updated))
 
 
