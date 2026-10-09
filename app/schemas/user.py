@@ -38,5 +38,7 @@ class UserOut(BaseModel):
     full_name: str | None = None
     is_active: bool
     role: str
+    #: A 512x512 JPEG, or null when the user has not set one.
+    avatar_url: str | None = None
 
     model_config = {"from_attributes": True}
