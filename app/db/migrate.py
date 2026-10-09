@@ -12,6 +12,11 @@ record, so it either applies and is recorded or neither happens. The scripts
 are written to be re-runnable anyway, which is what lets the ones applied by
 hand before this existed simply run again, change nothing, and be recorded.
 
+It connects through the app's own engine (`get_engine`), so the URL is
+cleaned and the pooler settings applied exactly as for the running service,
+which is known to connect, rather than by a second interpretation of
+DATABASE_URL that could disagree with it.
+
 Two deploys running at once are serialised by a transaction-level advisory
 lock. A session-level lock would not do: through Supabase's transaction
 pooler, consecutive statements may reach different server sessions.
@@ -23,10 +28,9 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-import asyncpg
-
 from app.config import settings
 from app.core.logging import get_logger
+from app.db.session import get_engine
 from app.services.storage_service import StorageService
 
 logger = get_logger(__name__)
@@ -46,16 +50,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at timestamptz NOT NULL DEFAULT now()
 )
 """
-
-
-def asyncpg_dsn(url: str) -> str:
-    """The app's SQLAlchemy URL as a plain libpq one asyncpg accepts."""
-    return url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-
-def connect_options(url: str) -> dict[str, Any]:
-    """No prepared-statement cache through Supabase's pooler (see session.py)."""
-    return {"statement_cache_size": 0} if "pooler.supabase.com" in url else {}
 
 
 async def apply_migrations(conn: Any, sql_dir: Path = SQL_DIR) -> list[str]:
@@ -80,12 +74,16 @@ async def apply_migrations(conn: Any, sql_dir: Path = SQL_DIR) -> list[str]:
 
 
 async def main() -> int:
-    url = settings.DATABASE_URL
-    conn = await asyncpg.connect(asyncpg_dsn(url), **connect_options(url))
+    engine = get_engine()
     try:
-        applied = await apply_migrations(conn)
+        async with engine.connect() as connection:
+            # The asyncpg connection underneath: scripts with DO blocks and
+            # several statements need its simple-query execute, which the
+            # SQLAlchemy layer does not offer.
+            raw = await connection.get_raw_connection()
+            applied = await apply_migrations(raw.driver_connection)
     finally:
-        await conn.close()
+        await engine.dispose()
     logger.info("migrations_done", applied=applied or "none new")
 
     storage = StorageService()

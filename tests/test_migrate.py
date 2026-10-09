@@ -112,25 +112,51 @@ def test_the_shipped_migrations_are_found_in_order() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("url", "dsn", "options"),
-    [
-        (
-            "postgresql+asyncpg://u:p@db.x.supabase.co:5432/postgres",
-            "postgresql://u:p@db.x.supabase.co:5432/postgres",
-            {},
-        ),
-        (
-            "postgresql+asyncpg://u:p@aws-0.pooler.supabase.com:6543/postgres",
-            "postgresql://u:p@aws-0.pooler.supabase.com:6543/postgres",
-            {"statement_cache_size": 0},
-        ),
-    ],
-    ids=["direct", "pooler"],
-)
-def test_the_app_url_becomes_an_asyncpg_connection(url: str, dsn: str, options: dict) -> None:
-    assert migrate.asyncpg_dsn(url) == dsn
-    assert migrate.connect_options(url) == options
+@pytest.mark.asyncio
+async def test_main_migrates_through_the_apps_own_engine(
+    monkeypatch: pytest.MonkeyPatch, sql_dir: Path
+) -> None:
+    """The same URL cleaning and pooler settings as the running service.
+
+    A second reading of DATABASE_URL could disagree with session.py's, and
+    then the step would fail on a URL the service itself connects with.
+    """
+    conn = FakeConnection()
+    calls: list[str] = []
+
+    class _Raw:
+        driver_connection = conn
+
+    class _Connection:
+        async def __aenter__(self) -> _Connection:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            calls.append("connection closed")
+
+        async def get_raw_connection(self) -> _Raw:
+            return _Raw()
+
+    class _Engine:
+        def connect(self) -> _Connection:
+            return _Connection()
+
+        async def dispose(self) -> None:
+            calls.append("engine disposed")
+
+    async def _ensure(self: Any, bucket: str) -> str:
+        calls.append(f"bucket {bucket}")
+        return "exists"
+
+    monkeypatch.setattr(migrate, "get_engine", lambda: _Engine())
+    monkeypatch.setattr(migrate, "SQL_DIR", sql_dir)
+    monkeypatch.setattr(migrate.apply_migrations, "__defaults__", (sql_dir,))
+    monkeypatch.setattr(StorageService, "ensure_public_bucket", _ensure)
+
+    assert await migrate.main() == 0
+
+    assert conn.ledger == {"001_a.sql", "002_b.sql", "003_c.sql"}
+    assert calls == ["connection closed", "engine disposed", "bucket avatars"]
 
 
 # ── buckets ──────────────────────────────────────────────────────────────────

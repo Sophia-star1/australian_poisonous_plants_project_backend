@@ -99,9 +99,3 @@ build-backend = "hatchling.build"
 # import alone is an error, which buries the errors that matter.
 module = ["onnxruntime.*"]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-# asyncpg ships no type information either. app/db/migrate.py is the only
-# module that imports it directly; everything else goes through SQLAlchemy.
-module = ["asyncpg", "asyncpg.*"]
-ignore_missing_imports = true
