@@ -1,0 +1,22 @@
+-- A profile picture per account: `app_users.avatar_url`.
+--
+-- Holds the public URL of the user's avatar in the `avatars` storage bucket,
+-- or NULL when they have not set one (the app then shows its default). The
+-- backend writes it through `PUT /users/me/avatar` and clears it through
+-- `DELETE /users/me/avatar`; nothing else needs to.
+--
+-- Run this BEFORE deploying the code that reads the column. The ORM selects
+-- every mapped column whenever it loads a user, so a deploy that lands first
+-- fails every login, `/auth/me` and authenticated request with "column
+-- avatar_url does not exist" until this has run. The reverse order is safe:
+-- the current code simply ignores a column it does not know about.
+--
+-- Nullable with no default, so adding it touches no existing row and takes
+-- only a brief lock. Re-runnable thanks to IF NOT EXISTS.
+--
+-- Run once against the project database, either in the Supabase SQL editor or
+-- with psql. Note `psql` does not accept the app's `DATABASE_URL` as-is: drop
+-- the `+asyncpg` from its scheme first.
+--   psql "postgresql://…" -f sql/003_app_users_avatar.sql
+
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS avatar_url text;
