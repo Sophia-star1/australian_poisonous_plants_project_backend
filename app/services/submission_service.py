@@ -40,6 +40,7 @@ from app.schemas.submission import (
     content_fingerprint,
 )
 from app.services.plant_service import DuplicatePlantError, find_plant_named
+from app.services.screening_config_service import ScreeningConfigService
 from app.services.storage_service import StorageService, build_object_key
 
 
@@ -250,6 +251,12 @@ class SubmissionService:
         classifier = get_classifier()
         if classifier is None:
             return None
+
+        # The admin-adjustable thresholds: bring this process's override up to
+        # date from the config row, throttled inside the service and
+        # non-raising by design — the upload path must not fail because the
+        # config store cannot be read.
+        await ScreeningConfigService(self.db).refresh()
 
         verdicts: list[Verdict] = []
         for photo in photos:
