@@ -20,7 +20,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import Select, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from starlette.concurrency import run_in_threadpool
@@ -80,6 +80,11 @@ class ContentChangedError(RuntimeError):
             "check the changes before deciding."
         )
         self.current_version = current_version
+
+
+def _lock_submission(submission_id: UUID) -> Select[tuple[UUID]]:
+    """`SELECT ... FOR UPDATE` on one submission row, held until commit."""
+    return select(Submission.id).where(Submission.id == submission_id).with_for_update()
 
 
 def submission_fingerprint(submission: Submission) -> str:
@@ -594,10 +599,13 @@ class SubmissionService:
         any of them is uploaded. Without that, the refusal on create was one
         edit away from meaningless: submit a plant, then add anything at all.
         """
+        # Locked, not just read: a review in progress holds this row (see
+        # `update_status`), and this must wait for it rather than slip a photo
+        # change in after the reviewer's version check.
         guard = await self.db.execute(
-            select(Submission.id).where(
-                Submission.id == submission_id, Submission.status == PENDING_STATUS
-            )
+            select(Submission.id)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .with_for_update()
         )
         if guard.first() is None:
             return None
@@ -663,10 +671,13 @@ class SubmissionService:
         Promotes another image to primary if the deleted one held that flag,
         so a submission never ends up without a lead photo.
         """
+        # Locked, not just read: a review in progress holds this row (see
+        # `update_status`), and this must wait for it rather than slip a photo
+        # change in after the reviewer's version check.
         guard = await self.db.execute(
-            select(Submission.id).where(
-                Submission.id == submission_id, Submission.status == PENDING_STATUS
-            )
+            select(Submission.id)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .with_for_update()
         )
         if guard.first() is None:
             return None
@@ -727,7 +738,16 @@ class SubmissionService:
 
         The status transition is a guarded UPDATE rather than a read-modify-
         write, so two reviewers acting at once cannot both succeed.
+
+        The row is locked before the version is checked. The guarded UPDATE
+        only re-checks the status, so without the lock a contributor's edit
+        committing between this read and that UPDATE was approved unseen —
+        the version matched what was read, not what was then written. Every
+        contributor edit takes the same lock (`update_content` through its
+        UPDATE, `add_photos` and `delete_photo` explicitly), so one waits for
+        the other and whichever goes second sees the outcome.
         """
+        await self.db.execute(_lock_submission(submission_id))
         submission = await self.get_by_id(submission_id)
         if submission is None:
             return None
