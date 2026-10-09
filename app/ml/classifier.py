@@ -120,6 +120,49 @@ class ImageTooLargeError(ValueError):
     """The image declares more pixels than can be decoded safely."""
 
 
+# ── runtime thresholds ───────────────────────────────────────────────────────
+#
+# The grading bands are adjustable at runtime through the admin endpoints
+# (`app/api/v1/admin.py`), which write a row the screening path refreshes
+# from. The override lives here, in the process the classifier runs in, and
+# `classify` reads it on every call so a change applies without reloading
+# the model. A tuple rather than two globals, so readers see a consistent
+# pair; writes go through the lock for the same reason.
+
+_runtime_thresholds: tuple[float, float] | None = None
+_runtime_thresholds_lock = threading.Lock()
+
+
+def set_runtime_thresholds(reject_below: float, accept_at: float) -> None:
+    """Override the bands `classify` grades against, for this process.
+
+    Raised at the boundary so a bad pair never silently grades every photo
+    wrong: the validation here is the same one the database constraints and
+    the endpoint enforce.
+    """
+    if not 0.0 <= reject_below < accept_at <= 1.0:
+        raise ValueError(
+            f"Thresholds must satisfy 0 <= reject_below ({reject_below}) "
+            f"< accept_at ({accept_at}) <= 1."
+        )
+    global _runtime_thresholds
+    with _runtime_thresholds_lock:
+        _runtime_thresholds = (float(reject_below), float(accept_at))
+
+
+def clear_runtime_thresholds() -> None:
+    """Forget the override; `classify` grades by each instance's own bands again."""
+    global _runtime_thresholds
+    with _runtime_thresholds_lock:
+        _runtime_thresholds = None
+
+
+def runtime_thresholds() -> tuple[float, float] | None:
+    """The override in force, or `None` when nobody has set one."""
+    with _runtime_thresholds_lock:
+        return _runtime_thresholds
+
+
 def open_within_budget(data: bytes) -> Image.Image:
     """Open `data` so that decoding it cannot exceed `MAX_DECODE_PIXELS`.
 
@@ -262,11 +305,22 @@ class PlantClassifier:
         return float(1.0 / (1.0 + np.exp(-float(np.asarray(logit).reshape(-1)[0]))))
 
     def classify(self, data: bytes) -> Verdict:
-        """Score one photo and grade it."""
+        """Score one photo and grade it.
+
+        Grades against the admin-set runtime override when one is in force
+        (`runtime_thresholds`), and against this instance's own bands
+        otherwise — which keeps a directly-constructed classifier, such as the
+        ones the tests build, grading exactly by the values it was given.
+        """
+        override = runtime_thresholds()
+        if override is not None:
+            reject_below, accept_at = override
+        else:
+            reject_below, accept_at = self.reject_below, self.accept_at
         p = self.probability(data)
-        if p < self.reject_below:
+        if p < reject_below:
             decision = Decision.REJECT
-        elif p < self.accept_at:
+        elif p < accept_at:
             decision = Decision.FLAG
         else:
             decision = Decision.ACCEPT
