@@ -194,6 +194,13 @@ class PlantService:
 
         Invalid field names are silently dropped. Empty / whitespace-only
         queries resolve to `[]`.
+
+        Every match is ranked before `limit` applies. Cutting in SQL first
+        kept the alphabetically first `limit` matches and ranked only those,
+        so a broad query lost its best hits: typing "an" returned none of the
+        five plants whose names start with "An". The table holds about a
+        hundred rows, so loading every match costs little; ranking in SQL
+        would mean reimplementing `_score_match` there.
         """
         query = raw_query.strip()
         if not query:
@@ -211,19 +218,13 @@ class PlantService:
             if not selected:
                 return []
 
-        stmt = (
-            select(Plant)
-            .options(selectinload(Plant.images))
-            .where(or_(*selected))
-            .order_by(Plant.botanical_name.asc())
-            .limit(max(1, min(limit, 200)))
-        )
+        stmt = select(Plant).options(selectinload(Plant.images)).where(or_(*selected))
         result = await self.db.execute(stmt)
         rows = list(result.scalars().all())
 
         lowered = query.lower()
         rows.sort(key=lambda p: (-_score_match(p, lowered), (p.botanical_name or "").lower()))
-        return rows
+        return rows[: max(1, min(limit, 200))]
 
 
 __all__ = ["PlantService", "SEARCH_DEFAULT_LIMIT", "SEARCHABLE_FIELDS"]
