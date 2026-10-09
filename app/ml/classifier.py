@@ -120,7 +120,7 @@ class ImageTooLargeError(ValueError):
     """The image declares more pixels than can be decoded safely."""
 
 
-def _open_within_budget(data: bytes) -> Image.Image:
+def open_within_budget(data: bytes) -> Image.Image:
     """Open `data` so that decoding it cannot exceed `MAX_DECODE_PIXELS`.
 
     `Image.open` reads only the header, so the declared size is known before a
@@ -172,7 +172,7 @@ def preprocess(data: bytes, size: int) -> np.ndarray:
         ImageTooLargeError: the pixel dimensions are beyond the decode budget.
     """
     try:
-        opened = _open_within_budget(data)
+        opened = open_within_budget(data)
         image: Image.Image = (ImageOps.exif_transpose(opened) or opened).convert("RGB")
     except ImageTooLargeError:
         raise
