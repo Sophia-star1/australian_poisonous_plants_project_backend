@@ -376,20 +376,18 @@ async def test_promotion_yields_one_primary_whatever_the_submission_says(
     images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
     assert len(images) == len(flags)
     assert sum(1 for i in images if i.is_primary) == 1
-    # The caption follows the photo that ends up primary, not the stale flag.
-    assert [i.caption is not None for i in images] == [i.is_primary for i in images]
 
 
 @pytest.mark.asyncio
-async def test_only_the_primary_photo_gets_the_contributors_caption(
+async def test_promoted_photos_are_captioned_with_the_name_not_the_description(
     async_client: AsyncClient, review: Any
 ) -> None:
-    """The description belongs to the submission, not to each photograph.
+    """Regression: the contributor's description was published as a caption.
 
-    Copying it onto every promoted photo made a multi-photo approval render the
-    same sentence under three different pictures, which reads as a bug in the
-    gallery rather than as one description. Uncovered until now — the caption
-    was not asserted anywhere, so changing it broke no test.
+    It went out on the public plants endpoint exactly as typed — in production
+    as "Reported plant name: Test222\\r\\nTest222" — beside curated captions
+    that are all botanical names, and it is free text that can say where the
+    contributor lives. Every promoted photo now carries the plant's name.
     """
     state = review()
     await async_client.patch(
@@ -398,11 +396,9 @@ async def test_only_the_primary_photo_gets_the_contributors_caption(
     )
     images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
 
-    primary = [i for i in images if i.is_primary]
-    rest = [i for i in images if not i.is_primary]
-    assert len(primary) == 1
-    assert primary[0].caption is not None
-    assert all(i.caption is None for i in rest)
+    assert len(images) == 2
+    assert [i.caption for i in images] == ["Nerium oleander", "Nerium oleander"]
+    assert all("creek" not in (i.caption or "") for i in images), "description leaked"
 
 
 @pytest.mark.asyncio

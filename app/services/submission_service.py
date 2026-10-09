@@ -453,18 +453,21 @@ class SubmissionService:
         result = await self.db.execute(stmt)
         return result.scalars().all(), int(total or 0)
 
-    async def _promote_photos(self, submission: Submission, plant_id: int) -> list[PlantImage]:
+    async def _promote_photos(
+        self, submission: Submission, plant_id: int, *, caption: str
+    ) -> list[PlantImage]:
         """Copy a submission's photos into the curated plant library.
 
         Server-side copies, so the bytes never pass through this process. The
         originals stay in `submission-images` as the record of what the
         reviewer saw — the approval refers to those exact files.
 
-        The contributor's description becomes the caption of the **primary**
-        photo only. It describes the submission, not any one photograph, so
-        copying it onto all of them made a three-photo approval render the same
-        sentence three times under three different pictures — which reads as a
-        bug in the gallery rather than as one description.
+        Every promoted photo is captioned `caption` — the plant's botanical
+        name, as every curated photo is. The contributor's description used to
+        become the cover's caption, which published whatever they typed on a
+        public endpoint: line breaks and all, beside captions that are
+        otherwise all names, and free text that can say where they live. It
+        stays on the submission, where the reviewer reads it.
 
         Exactly one promoted photo is primary, whatever the submission says.
         `submission_images` has no constraint to that effect, and two
@@ -494,7 +497,7 @@ class SubmissionService:
                 PlantImage(
                     plant_id=plant_id,
                     image_url=stored.url or stored.key,
-                    caption=submission.user_description if is_primary else None,
+                    caption=caption,
                     is_primary=is_primary,
                 )
             )
@@ -785,7 +788,9 @@ class SubmissionService:
             if payload.status == "approved" and payload.plant is not None:
                 plant = await self._create_plant(payload.plant, submission)
                 plant_id = plant.id
-                for image in await self._promote_photos(submission, plant_id):
+                for image in await self._promote_photos(
+                    submission, plant_id, caption=plant.botanical_name
+                ):
                     self.db.add(image)
                 await self.db.flush()
 
