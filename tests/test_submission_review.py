@@ -21,7 +21,11 @@ from app.main import app
 from app.models.plant import Plant, PlantImage
 from app.models.submission import Submission, SubmissionImage
 from app.models.user import User
-from app.schemas.submission import PlantIdentification, SubmissionUpdate
+from app.schemas.submission import (
+    REVIEWER_NOTES_MAX_LENGTH,
+    PlantIdentification,
+    SubmissionUpdate,
+)
 from app.services.storage_service import StorageError, StoredFile
 from app.services.submission_service import (
     AlreadyReviewedError,
@@ -288,6 +292,14 @@ def test_botanical_name_is_mandatory() -> None:
     """It is the only NOT NULL column on plants."""
     with pytest.raises(ValidationError):
         PlantIdentification(botanical_name="")
+
+
+def test_reviewer_notes_are_bounded() -> None:
+    """They are quoted in full in the contributor's email."""
+    limit = REVIEWER_NOTES_MAX_LENGTH
+    SubmissionUpdate(status="rejected", expected_version="v1", reviewer_notes="x" * limit)
+    with pytest.raises(ValidationError, match="at most 2000 characters"):
+        SubmissionUpdate(status="rejected", expected_version="v1", reviewer_notes="x" * (limit + 1))
 
 
 # ── approval ─────────────────────────────────────────────────────────────────

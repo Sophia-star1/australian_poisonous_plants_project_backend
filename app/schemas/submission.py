@@ -22,6 +22,9 @@ from app.models.plant import TOXICITY_SPECIES
 SubmissionStatus = Literal["pending", "approved", "rejected"]
 ReviewAction = Literal["approved", "rejected"]
 
+#: Longest `reviewer_notes` a review accepts — a few paragraphs.
+REVIEWER_NOTES_MAX_LENGTH = 2000
+
 #: The only status in which a submission may still change — a contributor may
 #: edit it, and it is the only state a review decision can be made from.
 PENDING_STATUS = "pending"
@@ -375,7 +378,9 @@ class SubmissionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: ReviewAction
-    reviewer_notes: str | None = None
+    #: Quoted in full in the contributor's email, unlike their own description
+    #: (which the email shortens), so it is bounded here instead.
+    reviewer_notes: str | None = Field(None, max_length=REVIEWER_NOTES_MAX_LENGTH)
     plant: PlantIdentification | None = None
     #: The `content_version` the reviewer was looking at. Required, not
     #: optional: a guard a client can forget to send is not a guard, and
