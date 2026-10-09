@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from app.config import settings
 from app.db.like import LIKE_ESCAPE, contains_pattern
 from app.ml.classifier import Decision, Verdict, get_classifier
-from app.models.plant import TOXICITY_SPECIES, UNKNOWN, Plant, PlantImage
+from app.models.plant import Plant, PlantImage, unknown_defaults
 from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import (
     PENDING_STATUS,
@@ -112,45 +112,6 @@ def submission_fingerprint(submission: Submission) -> str:
         longitude=submission.longitude,
         photos=[(image.id, image.is_primary) for image in submission.images],
     )
-
-
-def _unknown_defaults() -> dict[str, Any]:
-    """Every NOT NULL `plants_v2` column, set to the dataset's "no value".
-
-    `plants_v2` has no nullable columns and records a gap as the string
-    `'Unknown'` — as `['Unknown']` for a text array, and as an object of
-    `'Unknown'` for the two jsonb columns. `botanical_name` is absent on
-    purpose: a reviewer must supply it, and defaulting it to `'Unknown'` would
-    publish an unnamed plant rather than fail.
-
-    Built fresh on each call because the nested structures are mutable; a
-    module-level constant would be shared between every approved plant.
-    """
-    return {
-        "family_name": UNKNOWN,
-        "common_names": [UNKNOWN],
-        "origin_status": UNKNOWN,
-        "distribution": [UNKNOWN],
-        "habitat": UNKNOWN,
-        "seasonality_of_toxicity": UNKNOWN,
-        "toxic_parts": [UNKNOWN],
-        "lethality": UNKNOWN,
-        "health_effects": UNKNOWN,
-        "toxicity_by_species": {key: UNKNOWN for key in (*TOXICITY_SPECIES, "notes")},
-        "toxin_profile": {
-            "primary_class": UNKNOWN,
-            "secondary_class": UNKNOWN,
-            "toxins_implicated": UNKNOWN,
-        },
-        "morphological_attributes": {
-            "height_m": UNKNOWN,
-            "growth_form": UNKNOWN,
-            "woodiness": UNKNOWN,
-            "life_history": UNKNOWN,
-            "fruit_colour": UNKNOWN,
-            "flowering_time": [UNKNOWN],
-        },
-    }
 
 
 class NotAPlantError(ValueError):
@@ -563,7 +524,7 @@ class SubmissionService:
         if not fields.get("distribution") and submission.location_state:
             fields["distribution"] = [submission.location_state]
 
-        defaults = _unknown_defaults()
+        defaults = unknown_defaults()
         for name in ("toxicity_by_species", "toxin_profile", "morphological_attributes"):
             if name in fields:
                 fields[name] = {**defaults[name], **fields[name]}

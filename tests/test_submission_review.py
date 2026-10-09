@@ -19,7 +19,7 @@ from app.api.v1 import submissions as api
 from app.db.session import get_db
 from app.dependencies import get_current_active_user
 from app.main import app
-from app.models.plant import Plant, PlantImage
+from app.models.plant import Plant, PlantImage, unknown_defaults
 from app.models.submission import Submission, SubmissionImage
 from app.models.user import User
 from app.schemas.submission import (
@@ -31,7 +31,6 @@ from app.services.storage_service import StorageError, StoredFile
 from app.services.submission_service import (
     AlreadyReviewedError,
     SubmissionService,
-    _unknown_defaults,
     submission_fingerprint,
 )
 
@@ -495,7 +494,7 @@ async def test_partial_objects_are_completed_with_unknown(
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
 
     species = plant.toxicity_by_species
-    assert set(species) == set(_unknown_defaults()["toxicity_by_species"])
+    assert set(species) == set(unknown_defaults()["toxicity_by_species"])
     assert species["humans"] == "Toxic"
     assert species["notes"] == "seeds"
     assert {species[k] for k in species if k not in ("humans", "notes")} == {"Unknown"}
@@ -508,7 +507,7 @@ async def test_partial_objects_are_completed_with_unknown(
     }
 
     morph = plant.morphological_attributes
-    assert set(_unknown_defaults()["morphological_attributes"]) <= set(morph)
+    assert set(unknown_defaults()["morphological_attributes"]) <= set(morph)
     assert morph["height_m"] == 3
     assert morph["rhizome"] == "thick"
     assert morph["woodiness"] == "Unknown"
@@ -554,7 +553,7 @@ async def test_complete_identification_produces_no_warnings(
 
 def _library_plant(plant_id: int = 7, *, has_cover: bool = True) -> Plant:
     """A curated entry, as `db.get` returns it: images loaded with the row."""
-    plant = Plant(id=plant_id, botanical_name="Abrus precatorius", **_unknown_defaults())
+    plant = Plant(id=plant_id, botanical_name="Abrus precatorius", **unknown_defaults())
     if has_cover:
         cover = PlantImage(
             id=1,
