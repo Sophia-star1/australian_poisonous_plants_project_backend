@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     #: point at that bucket, and promoted photos belong next to the library
     #: they are joined to, not in the v1 bucket the app no longer reads.
     SUPABASE_PLANT_BUCKET: str = "plant-images-v2"
+    #: Profile pictures. Public, like the plant bucket: an avatar is shown to
+    #: whoever sees the account, and each upload gets a new random key.
+    SUPABASE_AVATAR_BUCKET: str = "avatars"
     #: Rejected uploads, per policy: keep the originals as an audit trail.
     MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     ALLOWED_IMAGE_TYPES: list[str] = ["image/jpeg", "image/png", "image/webp"]

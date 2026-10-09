@@ -7,18 +7,27 @@ administrator meant hand-writing SQL against the production database.
 * `GET   /users/`            — admin: paginated list, optionally by role.
 * `GET   /users/{id}`        — admin: single user.
 * `PATCH /users/{id}/role`   — admin: change a role.
+
+And for every signed-in user, their own profile picture:
+
+* `PUT    /users/me/avatar`  — upload or replace it.
+* `DELETE /users/me/avatar`  — remove it.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ForbiddenError, NotFoundError
+from app.config import settings
+from app.core.exceptions import ForbiddenError, NotFoundError, UnprocessableError
 from app.db.session import get_db
-from app.dependencies import require_admin
+from app.dependencies import get_current_active_user, require_admin
+from app.ml.classifier import ImageTooLargeError, UndecodableImageError
 from app.models.user import User
 from app.schemas.common import ApiResponse, PageResult
 from app.schemas.role import UserRole
 from app.schemas.user import UserOut, UserRoleUpdate
+from app.services.avatar_service import AvatarService
+from app.services.storage_service import StorageError
 from app.services.user_service import UserService
 
 router = APIRouter()
@@ -105,3 +114,80 @@ async def update_user_role(
     if updated is None:  # pragma: no cover - the row was deleted mid-request
         raise NotFoundError(f"User {user_id} not found.")
     return ApiResponse.success(data=UserOut.model_validate(updated))
+
+
+@router.put("/me/avatar", response_model=ApiResponse[UserOut])
+async def set_my_avatar(
+    file: UploadFile = File(..., description="The picture: JPEG, PNG or WebP."),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> ApiResponse[UserOut]:
+    """Upload or replace your profile picture.
+
+    Send one image under `file`: JPEG, PNG or WebP, within the upload size
+    limit. It is centre-cropped to a square, resized to 512x512 and
+    stored as a JPEG, with its metadata (including any GPS position) removed.
+    Returns your account with the new `avatar_url`; the URL changes with
+    every upload, and the previous picture is deleted.
+
+    Errors:
+
+    * `401` — not signed in.
+    * `422` — not JPEG, PNG or WebP, not a readable image, too large a file,
+      or too many pixels to process.
+    """
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in settings.ALLOWED_IMAGE_TYPES:
+        allowed = ", ".join(settings.ALLOWED_IMAGE_TYPES)
+        raise UnprocessableError(
+            f"Unsupported type '{content_type or 'unknown'}'. Allowed: {allowed}."
+        )
+
+    service = AvatarService(db)
+    try:
+        previous = await service.replace(current_user, file)
+    except ImageTooLargeError as exc:
+        raise UnprocessableError(
+            f"The picture is too large to process ({exc}). Export it at a smaller "
+            "size, or as a JPEG, and try again."
+        ) from exc
+    except UndecodableImageError as exc:
+        raise UnprocessableError("The file is not a readable image.") from exc
+    except StorageError as exc:
+        # Too large a file, or storage unavailable.
+        raise UnprocessableError(str(exc)) from exc
+
+    out = UserOut.model_validate(current_user)
+    # Committed before answering, and before the old picture is deleted: a
+    # failed commit leaves the account on its old avatar, so the new upload is
+    # the one to take back.
+    try:
+        await db.commit()
+    except Exception:
+        await service.discard_upload()
+        raise
+    if previous:
+        await service.delete_file(previous)
+    return ApiResponse.success(data=out, message="Avatar updated.")
+
+
+@router.delete("/me/avatar", response_model=ApiResponse[UserOut])
+async def remove_my_avatar(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> ApiResponse[UserOut]:
+    """Remove your profile picture; `avatar_url` becomes null.
+
+    Removing one you do not have is not an error.
+
+    Errors:
+
+    * `401` — not signed in.
+    """
+    service = AvatarService(db)
+    previous = await service.remove(current_user)
+    out = UserOut.model_validate(current_user)
+    await db.commit()
+    if previous:
+        await service.delete_file(previous)
+    return ApiResponse.success(data=out, message="Avatar removed.")
