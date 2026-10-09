@@ -65,7 +65,7 @@ steps:
       # The leading ^;^ switches the delimiter to ';' because ALLOWED_ORIGINS
       # contains commas.
       - "--set-env-vars"
-      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=["http://aupoisonousplants.world","http://www.aupoisonousplants.world"];SUPABASE_URL=${_SUPABASE_URL};EMAIL_FROM=${_EMAIL_FROM};SMTP_HOST=${_SMTP_HOST};SMTP_PORT=${_SMTP_PORT};SMTP_USERNAME=${_SMTP_USERNAME}'
+      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:8081","http://localhost:19006","http://aupoisonousplants.world","https://aupoisonousplants.world","http://www.aupoisonousplants.world","https://www.aupoisonousplants.world"];SUPABASE_URL=${_SUPABASE_URL};EMAIL_FROM=${_EMAIL_FROM};SMTP_HOST=${_SMTP_HOST};SMTP_PORT=${_SMTP_PORT};SMTP_USERNAME=${_SMTP_USERNAME}'
       # The Supabase secret key bypasses row level security: Secret Manager
       # only, never an env var and never a client bundle. The same goes for
       # SMTP_PASSWORD, the mailbox's password: anyone holding it can read and

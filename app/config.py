@@ -198,6 +198,10 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://localhost:8081",
         "http://localhost:19006",
+        "http://aupoisonousplants.world",
+        "https://aupoisonousplants.world",
+        "http://www.aupoisonousplants.world",
+        "https://www.aupoisonousplants.world",
     ]
 
     # --- Rate limiting (credential endpoints) ---
