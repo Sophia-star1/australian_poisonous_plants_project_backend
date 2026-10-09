@@ -1,6 +1,6 @@
 """User CRUD schemas."""
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.schemas.role import DEFAULT_ROLE, UserRole
 
@@ -22,6 +22,21 @@ class UserUpdate(BaseModel):
     full_name: str | None = None
     is_active: bool | None = None
     role: UserRole | None = None
+
+
+class UserNameUpdate(BaseModel):
+    """Self-service display-name change, for `PATCH /users/me`.
+
+    Whitespace is stripped before the length checks, so a name of `"   "`
+    fails `min_length` instead of being stored as an empty string. Clearing
+    the name is deliberately impossible: the client falls back to the email
+    prefix when no name is set, but the stored value must stay a real name —
+    otherwise "not set" and "erased on purpose" become indistinguishable.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    full_name: str = Field(..., min_length=1, max_length=255)
 
 
 class UserRoleUpdate(BaseModel):

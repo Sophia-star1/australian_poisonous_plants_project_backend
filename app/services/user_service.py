@@ -66,6 +66,16 @@ class UserService:
         await self.db.refresh(user)
         return user
 
+    async def set_full_name(self, user_id: int, full_name: str) -> User | None:
+        """Change a user's display name. Returns None when the user does not exist."""
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return None
+        user.full_name = full_name
+        await self.db.flush()
+        await self.db.refresh(user)
+        return user
+
     async def count_with_role(self, role: UserRole) -> int:
         """Count active accounts holding `role`.
 
