@@ -150,6 +150,58 @@ class StorageService:
 
     # ── operations ───────────────────────────────────────────────────────────
 
+    async def ensure_public_bucket(self, bucket: str) -> str:
+        """Create `bucket` as a public bucket unless it already exists.
+
+        Returns what it found or did: `"exists"`, `"created"`, `"skipped"`
+        (storage not configured), or `"exists-private"`. A private bucket is
+        left private, with a warning: making one public exposes whatever is
+        in it, which is a decision for a person, not something a deploy
+        should do on its own.
+
+        Raises:
+            StorageError: storage could not be reached, or refused.
+        """
+        if not self.enabled:
+            return "skipped"
+
+        url = f"{self.base_url}/storage/v1/bucket/{bucket}"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                found = await client.get(url, headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise StorageError(f"Storage request failed: {type(exc).__name__}.") from exc
+
+        if found.status_code == 200:
+            if found.json().get("public"):
+                return "exists"
+            logger.warning(
+                "storage_bucket_private",
+                bucket=bucket,
+                detail="Left private; its public URLs will not load until it is made public.",
+            )
+            return "exists-private"
+
+        # Supabase answers a missing bucket with 400 and "Bucket not found" in
+        # the body rather than a plain 404.
+        if found.status_code not in (400, 404) or "not found" not in found.text.lower():
+            raise StorageError(
+                f"Could not check bucket '{bucket}': HTTP {found.status_code} {found.text[:200]}"
+            )
+
+        created = await self._post(
+            f"{self.base_url}/storage/v1/bucket",
+            self._headers("application/json"),
+            json={"id": bucket, "name": bucket, "public": True},
+        )
+        if created.status_code >= 400:
+            raise StorageError(
+                f"Could not create bucket '{bucket}': HTTP {created.status_code} "
+                f"{created.text[:200]}"
+            )
+        logger.info("storage_bucket_created", bucket=bucket, public=True)
+        return "created"
+
     async def upload_bytes(
         self, data: bytes, key: str, bucket: str, content_type: str
     ) -> StoredFile:

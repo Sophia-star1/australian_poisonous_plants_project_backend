@@ -15,6 +15,20 @@ steps:
       - "push"
       - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
 
+  # Apply database migrations (sql/) and make sure the public storage buckets
+  # exist, before the new code goes live: code that reads a column must never
+  # be deployed ahead of the column. Runs the image just pushed, so it applies
+  # exactly the sql/ this deploy ships. A failure stops the build here and
+  # the running revision is left as it is. See app/db/migrate.py.
+  - name: "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
+    id: migrate
+    entrypoint: sh
+    # From /app, so `-m` imports the image's code rather than /workspace's.
+    args: ["-c", "cd /app && python -m app.db.migrate"]
+    env:
+      - "SUPABASE_URL=${_SUPABASE_URL}"
+    secretEnv: ["DATABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+
   # Deploy to Cloud Run
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
@@ -81,6 +95,15 @@ substitutions:
   _SMTP_HOST: mail.privateemail.com
   _SMTP_PORT: "587"
   _SMTP_USERNAME: info@aupoisonousplants.world
+
+# Read by the migrate step only, from the same secrets the service mounts.
+# The build's service account already has secretAccessor on both.
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/database-url/versions/latest
+      env: DATABASE_URL
+    - versionName: projects/${PROJECT_ID}/secrets/supabase-secret-key/versions/latest
+      env: SUPABASE_SERVICE_ROLE_KEY
 
 options:
   logging: CLOUD_LOGGING_ONLY
