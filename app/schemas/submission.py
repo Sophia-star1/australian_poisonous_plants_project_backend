@@ -188,7 +188,9 @@ def _clear_blanks(model: BaseModel) -> None:
     `exclude_none`, so all three then fall through to the `'Unknown'` default
     rather than being written as `""`, `[""]` or `[]`.
     """
-    for name in type(model).model_fields:
+    # Extra keys too: `MorphologicalAttributes` accepts any, and a blank one
+    # was otherwise stored as "" rather than left out.
+    for name in [*type(model).model_fields, *(model.model_extra or {})]:
         value = getattr(model, name)
         if isinstance(value, str) and not value.strip():
             setattr(model, name, None)
