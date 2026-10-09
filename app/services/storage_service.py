@@ -249,6 +249,21 @@ class StorageService:
             return False
         return True
 
+    def key_in_bucket(self, url: str, bucket: str) -> str | None:
+        """The key of `url` if it is a public URL into `bucket` of this project.
+
+        `None` for anything else — another bucket, another host, a bare path.
+        Unlike `key_from_url`, which drops whatever bucket the URL names, this
+        is safe to delete by: it never yields a key in a bucket you did not
+        name, or for a file hosted somewhere else.
+        """
+        if not self.base_url:
+            return None
+        prefix = f"{self.base_url}/storage/v1/object/public/{bucket}/"
+        if not url.startswith(prefix) or len(url) == len(prefix):
+            return None
+        return url[len(prefix) :]
+
     def key_from_url(self, url: str) -> str:
         """Recover the storage key from a public URL.
 

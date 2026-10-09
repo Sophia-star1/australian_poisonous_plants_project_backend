@@ -20,14 +20,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import Select, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.db.like import LIKE_ESCAPE, contains_pattern
 from app.ml.classifier import Decision, Verdict, get_classifier
-from app.models.plant import TOXICITY_SPECIES, UNKNOWN, Plant, PlantImage
+from app.models.plant import Plant, PlantImage, unknown_defaults
 from app.models.submission import Submission, SubmissionImage
 from app.schemas.submission import (
     PENDING_STATUS,
@@ -38,6 +39,7 @@ from app.schemas.submission import (
     SubmissionUpdate,
     content_fingerprint,
 )
+from app.services.plant_service import DuplicatePlantError, find_plant_named
 from app.services.storage_service import StorageService, build_object_key
 
 
@@ -71,6 +73,14 @@ def reset_screening_limit() -> None:
     _screening_semaphore = None
 
 
+class PlantNotFoundError(LookupError):
+    """An approval named a `plant_id` that is not in the library."""
+
+    def __init__(self, plant_id: int) -> None:
+        super().__init__(f"Plant {plant_id} does not exist; nothing was approved.")
+        self.plant_id = plant_id
+
+
 class ContentChangedError(RuntimeError):
     """The submission changed after the reviewer loaded it."""
 
@@ -80,6 +90,11 @@ class ContentChangedError(RuntimeError):
             "check the changes before deciding."
         )
         self.current_version = current_version
+
+
+def _lock_submission(submission_id: UUID) -> Select[tuple[UUID]]:
+    """`SELECT ... FOR UPDATE` on one submission row, held until commit."""
+    return select(Submission.id).where(Submission.id == submission_id).with_for_update()
 
 
 def submission_fingerprint(submission: Submission) -> str:
@@ -97,45 +112,6 @@ def submission_fingerprint(submission: Submission) -> str:
         longitude=submission.longitude,
         photos=[(image.id, image.is_primary) for image in submission.images],
     )
-
-
-def _unknown_defaults() -> dict[str, Any]:
-    """Every NOT NULL `plants_v2` column, set to the dataset's "no value".
-
-    `plants_v2` has no nullable columns and records a gap as the string
-    `'Unknown'` — as `['Unknown']` for a text array, and as an object of
-    `'Unknown'` for the two jsonb columns. `botanical_name` is absent on
-    purpose: a reviewer must supply it, and defaulting it to `'Unknown'` would
-    publish an unnamed plant rather than fail.
-
-    Built fresh on each call because the nested structures are mutable; a
-    module-level constant would be shared between every approved plant.
-    """
-    return {
-        "family_name": UNKNOWN,
-        "common_names": [UNKNOWN],
-        "origin_status": UNKNOWN,
-        "distribution": [UNKNOWN],
-        "habitat": UNKNOWN,
-        "seasonality_of_toxicity": UNKNOWN,
-        "toxic_parts": [UNKNOWN],
-        "lethality": UNKNOWN,
-        "health_effects": UNKNOWN,
-        "toxicity_by_species": {key: UNKNOWN for key in (*TOXICITY_SPECIES, "notes")},
-        "toxin_profile": {
-            "primary_class": UNKNOWN,
-            "secondary_class": UNKNOWN,
-            "toxins_implicated": UNKNOWN,
-        },
-        "morphological_attributes": {
-            "height_m": UNKNOWN,
-            "growth_form": UNKNOWN,
-            "woodiness": UNKNOWN,
-            "life_history": UNKNOWN,
-            "fruit_colour": UNKNOWN,
-            "flowering_time": [UNKNOWN],
-        },
-    }
 
 
 class NotAPlantError(ValueError):
@@ -416,13 +392,19 @@ class SubmissionService:
         conditions = []
         if filters.status:
             conditions.append(Submission.status == filters.status)
+        # Escaped, so `_` and `%` in what the reviewer typed match themselves:
+        # an email filter for "first_last" otherwise also matched "firstxlast".
         if filters.contributor_name:
             conditions.append(
-                Submission.contributor_name.ilike(f"%{filters.contributor_name}%")
+                Submission.contributor_name.ilike(
+                    contains_pattern(filters.contributor_name), escape=LIKE_ESCAPE
+                )
             )
         if filters.contributor_email:
             conditions.append(
-                Submission.contributor_email.ilike(f"%{filters.contributor_email}%")
+                Submission.contributor_email.ilike(
+                    contains_pattern(filters.contributor_email), escape=LIKE_ESCAPE
+                )
             )
 
         total = await self.db.scalar(
@@ -441,18 +423,21 @@ class SubmissionService:
         result = await self.db.execute(stmt)
         return result.scalars().all(), int(total or 0)
 
-    async def _promote_photos(self, submission: Submission, plant_id: int) -> list[PlantImage]:
+    async def _promote_photos(
+        self, submission: Submission, plant_id: int, *, caption: str, cover: bool = True
+    ) -> list[PlantImage]:
         """Copy a submission's photos into the curated plant library.
 
         Server-side copies, so the bytes never pass through this process. The
         originals stay in `submission-images` as the record of what the
         reviewer saw — the approval refers to those exact files.
 
-        The contributor's description becomes the caption of the **primary**
-        photo only. It describes the submission, not any one photograph, so
-        copying it onto all of them made a three-photo approval render the same
-        sentence three times under three different pictures — which reads as a
-        bug in the gallery rather than as one description.
+        Every promoted photo is captioned `caption` — the plant's botanical
+        name, as every curated photo is. The contributor's description used to
+        become the cover's caption, which published whatever they typed on a
+        public endpoint: line breaks and all, beside captions that are
+        otherwise all names, and free text that can say where they live. It
+        stays on the submission, where the reviewer reads it.
 
         Exactly one promoted photo is primary, whatever the submission says.
         `submission_images` has no constraint to that effect, and two
@@ -464,11 +449,14 @@ class SubmissionService:
         instead publish a plant with no cover. Re-deriving the flag from the
         primary-first order makes both cases come out the same as the normal
         one.
+
+        With `cover=False` — joining a plant that already has a cover — none
+        of them is primary, for the same index's sake.
         """
         promoted: list[PlantImage] = []
         ordered = sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id)))
         for position, image in enumerate(ordered):
-            is_primary = position == 0
+            is_primary = cover and position == 0
             source_key = self.storage.key_from_url(image.image_url)
             destination_key = build_object_key(f"plants/{plant_id}", source_key)
             stored = await self.storage.copy_object(
@@ -482,7 +470,7 @@ class SubmissionService:
                 PlantImage(
                     plant_id=plant_id,
                     image_url=stored.url or stored.key,
-                    caption=submission.user_description if is_primary else None,
+                    caption=caption,
                     is_primary=is_primary,
                 )
             )
@@ -536,7 +524,7 @@ class SubmissionService:
         if not fields.get("distribution") and submission.location_state:
             fields["distribution"] = [submission.location_state]
 
-        defaults = _unknown_defaults()
+        defaults = unknown_defaults()
         for name in ("toxicity_by_species", "toxin_profile", "morphological_attributes"):
             if name in fields:
                 fields[name] = {**defaults[name], **fields[name]}
@@ -594,10 +582,13 @@ class SubmissionService:
         any of them is uploaded. Without that, the refusal on create was one
         edit away from meaningless: submit a plant, then add anything at all.
         """
+        # Locked, not just read: a review in progress holds this row (see
+        # `update_status`), and this must wait for it rather than slip a photo
+        # change in after the reviewer's version check.
         guard = await self.db.execute(
-            select(Submission.id).where(
-                Submission.id == submission_id, Submission.status == PENDING_STATUS
-            )
+            select(Submission.id)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .with_for_update()
         )
         if guard.first() is None:
             return None
@@ -663,10 +654,13 @@ class SubmissionService:
         Promotes another image to primary if the deleted one held that flag,
         so a submission never ends up without a lead photo.
         """
+        # Locked, not just read: a review in progress holds this row (see
+        # `update_status`), and this must wait for it rather than slip a photo
+        # change in after the reviewer's version check.
         guard = await self.db.execute(
-            select(Submission.id).where(
-                Submission.id == submission_id, Submission.status == PENDING_STATUS
-            )
+            select(Submission.id)
+            .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
+            .with_for_update()
         )
         if guard.first() is None:
             return None
@@ -721,13 +715,28 @@ class SubmissionService:
 
         Approving is a single transaction across three things: the submission
         is marked reviewed, a `plants_v2` row is created from the reviewer's
-        identification, and the photos are copied into `plant-images-v2`. If the
-        copy fails the whole request fails and nothing is committed, so an
-        approved plant never ends up without its photographs.
+        identification (or, with `plant_id`, an existing one is used), and the
+        photos are copied into `plant-images-v2`. If the copy fails the whole
+        request fails and nothing is committed, so an approved plant never ends
+        up without its photographs.
+
+        A new identification whose botanical name is already in the library is
+        refused (`DuplicatePlantError`) rather than published twice, and a
+        `plant_id` that does not exist is refused (`PlantNotFoundError`); both
+        before anything is written.
 
         The status transition is a guarded UPDATE rather than a read-modify-
         write, so two reviewers acting at once cannot both succeed.
+
+        The row is locked before the version is checked. The guarded UPDATE
+        only re-checks the status, so without the lock a contributor's edit
+        committing between this read and that UPDATE was approved unseen —
+        the version matched what was read, not what was then written. Every
+        contributor edit takes the same lock (`update_content` through its
+        UPDATE, `add_photos` and `delete_photo` explicitly), so one waits for
+        the other and whichever goes second sees the outcome.
         """
+        await self.db.execute(_lock_submission(submission_id))
         submission = await self.get_by_id(submission_id)
         if submission is None:
             return None
@@ -738,6 +747,19 @@ class SubmissionService:
         current_version = submission_fingerprint(submission)
         if payload.expected_version != current_version:
             raise ContentChangedError(current_version)
+
+        # Where an approval publishes to, settled before anything is written:
+        # both refusals are about the request, not about the submission.
+        existing: Plant | None = None
+        if payload.status == "approved":
+            if payload.plant_id is not None:
+                existing = await self.db.get(Plant, payload.plant_id)
+                if existing is None:
+                    raise PlantNotFoundError(payload.plant_id)
+            elif payload.plant is not None:
+                duplicate = await find_plant_named(self.db, payload.plant.botanical_name)
+                if duplicate is not None:
+                    raise DuplicatePlantError(payload.plant.botanical_name, duplicate)
 
         guard = await self.db.execute(
             update(Submission)
@@ -755,10 +777,22 @@ class SubmissionService:
 
         plant_id: int | None = None
         try:
-            if payload.status == "approved" and payload.plant is not None:
-                plant = await self._create_plant(payload.plant, submission)
+            if payload.status == "approved":
+                if existing is not None:
+                    plant = existing
+                    # Joining a gallery that already has a cover adds photos
+                    # beside it; only a plant with no cover left takes one.
+                    cover = not any(image.is_primary for image in existing.images)
+                elif payload.plant is not None:
+                    plant = await self._create_plant(payload.plant, submission)
+                    cover = True
+                else:
+                    # SubmissionUpdate refuses an approval with neither.
+                    raise ValueError("An approval needs 'plant' or 'plant_id'.")
                 plant_id = plant.id
-                for image in await self._promote_photos(submission, plant_id):
+                for image in await self._promote_photos(
+                    submission, plant_id, caption=plant.botanical_name, cover=cover
+                ):
                     self.db.add(image)
                 await self.db.flush()
 

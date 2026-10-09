@@ -22,6 +22,9 @@ from app.models.plant import TOXICITY_SPECIES
 SubmissionStatus = Literal["pending", "approved", "rejected"]
 ReviewAction = Literal["approved", "rejected"]
 
+#: Longest `reviewer_notes` a review accepts — a few paragraphs.
+REVIEWER_NOTES_MAX_LENGTH = 2000
+
 #: The only status in which a submission may still change — a contributor may
 #: edit it, and it is the only state a review decision can be made from.
 PENDING_STATUS = "pending"
@@ -185,7 +188,9 @@ def _clear_blanks(model: BaseModel) -> None:
     `exclude_none`, so all three then fall through to the `'Unknown'` default
     rather than being written as `""`, `[""]` or `[]`.
     """
-    for name in type(model).model_fields:
+    # Extra keys too: `MorphologicalAttributes` accepts any, and a blank one
+    # was otherwise stored as "" rather than left out.
+    for name in [*type(model).model_fields, *(model.model_extra or {})]:
         value = getattr(model, name)
         if isinstance(value, str) and not value.strip():
             setattr(model, name, None)
@@ -365,18 +370,76 @@ class PlantIdentification(BaseModel):
         return self
 
 
+class PlantUpdate(BaseModel):
+    """Admin correction of a published plant: send only what changes.
+
+    The same fields, and the same cleaning, as `PlantIdentification`:
+
+    * a field left out is unchanged;
+    * a field sent blank or `null` goes back to the dataset's "not recorded"
+      value, `'Unknown'` — except `botanical_name`, which cannot be cleared;
+    * the three objects are merged key by key into what is stored, so
+      `{"toxicity_by_species": {"dogs": "Toxic"}}` changes dogs and nothing
+      else, and a key sent blank resets just that key.
+    """
+
+    model_config = _REVIEWER_INPUT
+
+    botanical_name: str | None = Field(None, min_length=1, max_length=255)
+    family_name: str | None = None
+    common_names: list[str] | None = None
+    origin_status: str | None = None
+    distribution: list[str] | None = None
+    habitat: str | None = None
+    seasonality_of_toxicity: str | None = None
+    toxic_parts: list[str] | None = None
+    toxicity_by_species: ToxicityBySpecies | None = None
+    lethality: str | None = None
+    toxin_profile: ToxinProfile | None = None
+    health_effects: str | None = None
+    morphological_attributes: MorphologicalAttributes | None = None
+
+    @field_validator("botanical_name")
+    @classmethod
+    def _name_cannot_be_cleared(cls, value: str | None) -> str | None:
+        """Every row needs a name; omit it to keep the current one."""
+        if value is None:
+            raise ValueError("cannot be cleared; omit it to keep the current name")
+        return value
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> "PlantUpdate":
+        if not self.model_fields_set:
+            raise ValueError("Nothing to change: send at least one field.")
+        _clear_blanks(self)
+        return self
+
+
 class SubmissionUpdate(BaseModel):
     """Admin action: approve or reject a submission.
 
-    Approving requires `plant`: the reviewer's identification, which becomes a
-    new row in `plants_v2` with the submission's photos copied across.
+    Approving needs exactly one of:
+
+    * `plant` — the reviewer's identification of a species not yet in the
+      library, which becomes a new row in `plants_v2`;
+    * `plant_id` — an existing plant this is another observation of, whose
+      gallery the photos join.
+
+    Either way the submission's photos are copied across.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     status: ReviewAction
-    reviewer_notes: str | None = None
+    #: Quoted in full in the contributor's email, unlike their own description
+    #: (which the email shortens), so it is bounded here instead.
+    reviewer_notes: str | None = Field(None, max_length=REVIEWER_NOTES_MAX_LENGTH)
     plant: PlantIdentification | None = None
+    #: Most observations are of a species the library already holds; without
+    #: this, approving one published a second entry under the same name.
+    plant_id: int | None = Field(
+        None, ge=1, description="Add the photos to this existing plant instead of creating one."
+    )
     #: The `content_version` the reviewer was looking at. Required, not
     #: optional: a guard a client can forget to send is not a guard, and
     #: approving publishes photographs — the one thing that must not turn out
@@ -389,13 +452,20 @@ class SubmissionUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _identification_required_to_approve(self) -> "SubmissionUpdate":
-        """Approval without an identification would create nothing."""
-        if self.status == "approved" and self.plant is None:
-            raise ValueError(
-                "Approving a submission requires 'plant' with at least a botanical_name."
-            )
-        if self.status == "rejected" and self.plant is not None:
-            raise ValueError("'plant' is only meaningful when approving.")
+        """Approval needs a plant to publish to: a new one, or an existing one."""
+        if self.status == "approved":
+            if self.plant is None and self.plant_id is None:
+                raise ValueError(
+                    "Approving a submission requires 'plant' with at least a "
+                    "botanical_name, or 'plant_id' to add it to an existing plant."
+                )
+            if self.plant is not None and self.plant_id is not None:
+                raise ValueError(
+                    "Send 'plant' to create a new entry or 'plant_id' to add to an "
+                    "existing one, not both."
+                )
+        if self.status == "rejected" and (self.plant is not None or self.plant_id is not None):
+            raise ValueError("'plant' and 'plant_id' are only meaningful when approving.")
         return self
 
 
