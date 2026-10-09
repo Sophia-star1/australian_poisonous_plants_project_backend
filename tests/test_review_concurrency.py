@@ -187,6 +187,10 @@ class FakeSession:
 
         return _Result()
 
+    async def scalar(self, statement: Any) -> Any:
+        """The duplicate-name lookup: no plant by that name yet."""
+        return None
+
     async def flush(self) -> None:
         for obj in self.added:
             if isinstance(obj, Plant) and obj.id is None:

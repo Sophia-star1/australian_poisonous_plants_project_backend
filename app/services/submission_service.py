@@ -39,6 +39,7 @@ from app.schemas.submission import (
     SubmissionUpdate,
     content_fingerprint,
 )
+from app.services.plant_service import DuplicatePlantError, find_plant_named
 from app.services.storage_service import StorageService, build_object_key
 
 
@@ -70,6 +71,14 @@ def reset_screening_limit() -> None:
     """Drop the cached semaphore. For tests that change the setting."""
     global _screening_semaphore
     _screening_semaphore = None
+
+
+class PlantNotFoundError(LookupError):
+    """An approval named a `plant_id` that is not in the library."""
+
+    def __init__(self, plant_id: int) -> None:
+        super().__init__(f"Plant {plant_id} does not exist; nothing was approved.")
+        self.plant_id = plant_id
 
 
 class ContentChangedError(RuntimeError):
@@ -454,7 +463,7 @@ class SubmissionService:
         return result.scalars().all(), int(total or 0)
 
     async def _promote_photos(
-        self, submission: Submission, plant_id: int, *, caption: str
+        self, submission: Submission, plant_id: int, *, caption: str, cover: bool = True
     ) -> list[PlantImage]:
         """Copy a submission's photos into the curated plant library.
 
@@ -479,11 +488,14 @@ class SubmissionService:
         instead publish a plant with no cover. Re-deriving the flag from the
         primary-first order makes both cases come out the same as the normal
         one.
+
+        With `cover=False` — joining a plant that already has a cover — none
+        of them is primary, for the same index's sake.
         """
         promoted: list[PlantImage] = []
         ordered = sorted(submission.images, key=lambda i: (not i.is_primary, str(i.id)))
         for position, image in enumerate(ordered):
-            is_primary = position == 0
+            is_primary = cover and position == 0
             source_key = self.storage.key_from_url(image.image_url)
             destination_key = build_object_key(f"plants/{plant_id}", source_key)
             stored = await self.storage.copy_object(
@@ -742,9 +754,15 @@ class SubmissionService:
 
         Approving is a single transaction across three things: the submission
         is marked reviewed, a `plants_v2` row is created from the reviewer's
-        identification, and the photos are copied into `plant-images-v2`. If the
-        copy fails the whole request fails and nothing is committed, so an
-        approved plant never ends up without its photographs.
+        identification (or, with `plant_id`, an existing one is used), and the
+        photos are copied into `plant-images-v2`. If the copy fails the whole
+        request fails and nothing is committed, so an approved plant never ends
+        up without its photographs.
+
+        A new identification whose botanical name is already in the library is
+        refused (`DuplicatePlantError`) rather than published twice, and a
+        `plant_id` that does not exist is refused (`PlantNotFoundError`); both
+        before anything is written.
 
         The status transition is a guarded UPDATE rather than a read-modify-
         write, so two reviewers acting at once cannot both succeed.
@@ -769,6 +787,19 @@ class SubmissionService:
         if payload.expected_version != current_version:
             raise ContentChangedError(current_version)
 
+        # Where an approval publishes to, settled before anything is written:
+        # both refusals are about the request, not about the submission.
+        existing: Plant | None = None
+        if payload.status == "approved":
+            if payload.plant_id is not None:
+                existing = await self.db.get(Plant, payload.plant_id)
+                if existing is None:
+                    raise PlantNotFoundError(payload.plant_id)
+            elif payload.plant is not None:
+                duplicate = await find_plant_named(self.db, payload.plant.botanical_name)
+                if duplicate is not None:
+                    raise DuplicatePlantError(payload.plant.botanical_name, duplicate)
+
         guard = await self.db.execute(
             update(Submission)
             .where(Submission.id == submission_id, Submission.status == PENDING_STATUS)
@@ -785,11 +816,21 @@ class SubmissionService:
 
         plant_id: int | None = None
         try:
-            if payload.status == "approved" and payload.plant is not None:
-                plant = await self._create_plant(payload.plant, submission)
+            if payload.status == "approved":
+                if existing is not None:
+                    plant = existing
+                    # Joining a gallery that already has a cover adds photos
+                    # beside it; only a plant with no cover left takes one.
+                    cover = not any(image.is_primary for image in existing.images)
+                elif payload.plant is not None:
+                    plant = await self._create_plant(payload.plant, submission)
+                    cover = True
+                else:
+                    # SubmissionUpdate refuses an approval with neither.
+                    raise ValueError("An approval needs 'plant' or 'plant_id'.")
                 plant_id = plant.id
                 for image in await self._promote_photos(
-                    submission, plant_id, caption=plant.botanical_name
+                    submission, plant_id, caption=plant.botanical_name, cover=cover
                 ):
                     self.db.add(image)
                 await self.db.flush()

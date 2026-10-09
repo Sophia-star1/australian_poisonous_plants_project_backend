@@ -52,11 +52,13 @@ from app.schemas.submission import (
     SubmissionUpdate,
 )
 from app.services.notification_service import ReviewOutcome, notify_review
+from app.services.plant_service import DuplicatePlantError
 from app.services.storage_service import StorageError
 from app.services.submission_service import (
     AlreadyReviewedError,
     ContentChangedError,
     NotAPlantError,
+    PlantNotFoundError,
     SubmissionService,
 )
 
@@ -547,20 +549,33 @@ async def update_submission_status(
     photographs have changed since you loaded it the review is refused rather
     than applied — reload, see what changed, and decide again.
 
-    **Approving** requires `plant` with at least `botanical_name`. Everything
-    else about the plant is optional: the response returns `warnings` listing
-    what the published entry does not say, rather than blocking on it. Fields
-    you omit are left unset rather than blanked.
+    **Approving** needs exactly one of:
 
-    **Rejecting** must not carry `plant`. `reviewer_notes` is passed on to the
-    contributor in the email, so it is the most useful thing to fill in.
+    * `plant`, with at least `botanical_name`, for a species not yet in the
+      library: it is published as a new entry. Everything else about the plant
+      is optional: the response returns `warnings` listing what the published
+      entry does not say, rather than blocking on it. Fields you omit are left
+      unset rather than blanked. If a plant with that botanical name already
+      exists (ignoring case and spacing) this is a `409` naming its id; approve
+      into it with `plant_id` instead.
+    * `plant_id`, for another observation of a plant already in the library:
+      the photos join its gallery, beside its existing cover, and nothing else
+      about it changes. To correct the entry itself use `PATCH /plants/{id}`.
+
+    Either way the promoted photos are captioned with the plant's botanical
+    name; the contributor's description is not published.
+
+    **Rejecting** must carry neither `plant` nor `plant_id`. `reviewer_notes`
+    (up to 2000 characters) is passed on to the contributor in the email, so it
+    is the most useful thing to fill in.
 
     Errors:
 
-    * `409` — the submission was edited after you loaded it, or another
-      reviewer decided first.
-    * `422` — approving without an identification, rejecting with one, or a
-      photograph that could not be copied into the library.
+    * `409` — the submission was edited after you loaded it, another reviewer
+      decided first, or `plant` names a species already in the library.
+    * `422` — approving with neither `plant` nor `plant_id` (or with both),
+      rejecting with either, a `plant_id` that does not exist, notes over 2000
+      characters, or a photograph that could not be copied into the library.
     """
     svc = SubmissionService(db)
     try:
@@ -573,6 +588,12 @@ async def update_submission_status(
         raise ConflictError(str(exc)) from exc
     except AlreadyReviewedError as exc:
         raise ConflictError(str(exc)) from exc
+    except DuplicatePlantError as exc:
+        # 409, like the other two: the request is well formed, it would just
+        # publish a second entry for a plant the library already has.
+        raise ConflictError(str(exc)) from exc
+    except PlantNotFoundError as exc:
+        raise UnprocessableError(str(exc)) from exc
     except StorageError as exc:
         raise UnprocessableError(
             f"Could not copy the photos into the plant library: {exc}"

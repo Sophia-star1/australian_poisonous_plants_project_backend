@@ -371,8 +371,14 @@ class PlantIdentification(BaseModel):
 class SubmissionUpdate(BaseModel):
     """Admin action: approve or reject a submission.
 
-    Approving requires `plant`: the reviewer's identification, which becomes a
-    new row in `plants_v2` with the submission's photos copied across.
+    Approving needs exactly one of:
+
+    * `plant` — the reviewer's identification of a species not yet in the
+      library, which becomes a new row in `plants_v2`;
+    * `plant_id` — an existing plant this is another observation of, whose
+      gallery the photos join.
+
+    Either way the submission's photos are copied across.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -382,6 +388,11 @@ class SubmissionUpdate(BaseModel):
     #: (which the email shortens), so it is bounded here instead.
     reviewer_notes: str | None = Field(None, max_length=REVIEWER_NOTES_MAX_LENGTH)
     plant: PlantIdentification | None = None
+    #: Most observations are of a species the library already holds; without
+    #: this, approving one published a second entry under the same name.
+    plant_id: int | None = Field(
+        None, ge=1, description="Add the photos to this existing plant instead of creating one."
+    )
     #: The `content_version` the reviewer was looking at. Required, not
     #: optional: a guard a client can forget to send is not a guard, and
     #: approving publishes photographs — the one thing that must not turn out
@@ -394,13 +405,20 @@ class SubmissionUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _identification_required_to_approve(self) -> "SubmissionUpdate":
-        """Approval without an identification would create nothing."""
-        if self.status == "approved" and self.plant is None:
-            raise ValueError(
-                "Approving a submission requires 'plant' with at least a botanical_name."
-            )
-        if self.status == "rejected" and self.plant is not None:
-            raise ValueError("'plant' is only meaningful when approving.")
+        """Approval needs a plant to publish to: a new one, or an existing one."""
+        if self.status == "approved":
+            if self.plant is None and self.plant_id is None:
+                raise ValueError(
+                    "Approving a submission requires 'plant' with at least a "
+                    "botanical_name, or 'plant_id' to add it to an existing plant."
+                )
+            if self.plant is not None and self.plant_id is not None:
+                raise ValueError(
+                    "Send 'plant' to create a new entry or 'plant_id' to add to an "
+                    "existing one, not both."
+                )
+        if self.status == "rejected" and (self.plant is not None or self.plant_id is not None):
+            raise ValueError("'plant' and 'plant_id' are only meaningful when approving.")
         return self
 
 

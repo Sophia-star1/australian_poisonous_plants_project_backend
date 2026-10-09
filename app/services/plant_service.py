@@ -46,6 +46,40 @@ from app.schemas.plant import SEARCHABLE_FIELDS
 SEARCH_DEFAULT_LIMIT = 25
 
 
+class DuplicatePlantError(ValueError):
+    """A plant with this botanical name is already in the library."""
+
+    def __init__(self, name: str, existing_id: int) -> None:
+        super().__init__(
+            f"A plant named '{name}' already exists (id {existing_id}). Add to it "
+            "with plant_id instead of publishing a second entry."
+        )
+        self.existing_id = existing_id
+
+
+def _comparable_name(column: Any) -> Any:
+    """`column` trimmed, inner whitespace collapsed, lowercased — in SQL."""
+    return func.lower(func.regexp_replace(func.btrim(column), r"\s+", " ", "g"))
+
+
+async def find_plant_named(
+    db: AsyncSession, name: str, *, exclude_id: int | None = None
+) -> int | None:
+    """The id of a plant already called `name`, ignoring case and spacing.
+
+    `plants_v2` has no unique constraint on the name, so this check is what
+    stops a second "Abrus precatorius" being published. Two requests creating
+    the same new name at the same instant can still both pass it; adding the
+    constraint would close that, at the cost of a schema change.
+    """
+    wanted = " ".join(name.split()).lower()
+    stmt = select(Plant.id).where(_comparable_name(Plant.botanical_name) == wanted)
+    if exclude_id is not None:
+        stmt = stmt.where(Plant.id != exclude_id)
+    found = await db.scalar(stmt.order_by(Plant.id).limit(1))
+    return int(found) if found is not None else None
+
+
 def _array_ilike(col: Any, like: str) -> ColumnExpressionArgument[bool]:
     """Case-insensitive substring match against any element of a text array."""
     return func.array_to_string(col, ",").ilike(like, escape="\\")
