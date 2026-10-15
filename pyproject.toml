@@ -27,6 +27,10 @@ dependencies = [
     "pillow>=10.0",
     "pyyaml>=6.0",
     "numpy>=1.26",
+    # Decodes images too large for Pillow to hold in memory: it shrinks JPEG
+    # and WebP while decoding and streams PNG row by row. `[binary]` brings a
+    # prebuilt libvips, so the Docker image needs no system packages.
+    "pyvips[binary]>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -95,7 +99,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [[tool.mypy.overrides]]
-# onnxruntime ships no py.typed marker and no stubs on PyPI. Without this the
-# import alone is an error, which buries the errors that matter.
-module = ["onnxruntime.*"]
+# onnxruntime and pyvips ship no py.typed marker and no stubs on PyPI. Without
+# this the import alone is an error, which buries the errors that matter.
+module = ["onnxruntime.*", "pyvips.*"]
 ignore_missing_imports = true
