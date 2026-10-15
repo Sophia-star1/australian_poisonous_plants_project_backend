@@ -99,9 +99,30 @@ def test_bytes_that_are_not_an_image_are_refused() -> None:
         normalise_avatar(b"definitely not an image")
 
 
-def test_too_many_pixels_are_refused_before_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same budget as screening: a small file can declare a huge image."""
+def test_an_image_over_the_decode_budget_still_makes_an_avatar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same budget as screening. Over it, libvips decodes straight to a smaller
+    size, so a large PNG — refused before — becomes a normal avatar."""
     monkeypatch.setattr(classifier, "MAX_DECODE_PIXELS", 10_000)
+    monkeypatch.setattr(classifier, "SHRINK_TARGET_PIXELS", 2_500)
+    avatar = Image.open(io.BytesIO(normalise_avatar(_image_bytes((400, 400), fmt="PNG"))))
+    assert avatar.size == (AVATAR_SIZE, AVATAR_SIZE)
+
+
+def test_transparency_is_flattened_on_the_large_image_path_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(classifier, "MAX_DECODE_PIXELS", 10_000)
+    clear = _image_bytes((400, 400), mode="RGBA", fmt="PNG", colour=(0, 0, 0, 0))
+    avatar = Image.open(io.BytesIO(normalise_avatar(clear)))
+    assert avatar.getpixel((5, 5)) >= (250, 250, 250), "transparent areas turned black"
+
+
+def test_beyond_the_source_limit_an_avatar_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small file can declare a huge image; past this limit it is not decoded at all."""
+    monkeypatch.setattr(classifier, "MAX_DECODE_PIXELS", 10_000)
+    monkeypatch.setattr(classifier, "MAX_SOURCE_PIXELS", 100_000)
     with pytest.raises(ImageTooLargeError):
         normalise_avatar(_image_bytes((400, 400), fmt="PNG"))
 
