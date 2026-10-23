@@ -1,332 +1,207 @@
-# APL Backend
+# Australian Poisonous Plants: backend API
 
-> Enterprise-grade RESTful API scaffold built with FastAPI, designed for cloud-native containerized deployment.
+The REST API behind the Australian Poisonous Plants mobile app and website. It
+serves the poisonous-plant library and lets the public contribute plant
+photos, which administrators review before they are published.
 
-## Tech Stack
+- **Plant library:** browse, search and view plants with their toxicity
+  details and photos.
+- **Accounts:** sign-up and sign-in with tokens, profile name and picture,
+  contributor and reviewer badges.
+- **Contributions:** photo submissions. Each photo is screened by an on-board
+  "is this a plant?" model before it is stored. Contributors can edit a
+  submission until it is reviewed.
+- **Review:** administrators approve a submission into a new or existing plant
+  (its photos join the library) or reject it; the contributor is emailed
+  either way.
+- **Administration:** roles, plant corrections and deletion, screening
+  thresholds.
 
-| Layer | Tool | Version | Required |
-|---|---|---|---|
-| Framework | FastAPI | >=0.111 | Yes |
-| Server | Uvicorn (dev) / Gunicorn (prod) | latest | Yes |
-| Validation | Pydantic v2 | >=2.6 | Yes |
-| ORM | SQLAlchemy 2.0 (async) | >=2.0 | Yes |
-| DB Driver | asyncpg | latest | Yes |
-| Database | PostgreSQL (Supabase or local) | 16+ | Yes |
-| Migrations | Alembic | latest | Yes |
-| Auth | python-jose + passlib | latest | Yes |
-| Config | pydantic-settings | >=2.0 | Yes |
-| Logging | structlog (JSON) | latest | Yes |
-| Package Manager | uv | latest | Yes |
-| Object Storage | aioboto3 (S3/MinIO) | latest | No |
-| Cache | redis (hiredis) | >=5.0 | No |
-| Task Queue | Celery + Redis | latest | No |
-
-## Project Structure
-
-```
-apl_backend/
-│
-├── pyproject.toml                 # Dependencies, build config, tool settings (ruff/mypy/pytest)
-├── .env.example                   # Environment variable template (copy to .env)
-├── .env                           # Actual environment config (git-ignored, never commit)
-├── .gitignore                     # Git ignore rules
-├── .pre-commit-config.yaml        # Pre-commit hooks: ruff lint/format + mypy
-├── alembic.ini                    # Alembic migration runner config
-├── Dockerfile                     # Multi-stage production build (builder + runtime)
-├── docker-compose.yml             # Full-stack local orchestration (production)
-│
-├── alembic/                       # Database migration scripts
-│   ├── env.py                     # Async migration environment (reads DATABASE_URL from .env)
-│   └── versions/                  # Auto-generated migration files (empty until first migration)
-│
-├── app/                           # ──── Application source code ────
-│   ├── __init__.py
-│   ├── main.py                    # App factory: lifespan, middleware, routers, /health endpoint
-│   ├── config.py                  # Settings class (pydantic-settings, reads from .env)
-│   ├── dependencies.py            # FastAPI Depends: get_current_user, require_role, etc.
-│   │
-│   ├── api/                       # ── HTTP layer (routes only, no business logic) ──
-│   │   ├── __init__.py
-│   │   ├── router.py              # Aggregates all v1 routers under /api/v1
-│   │   └── v1/
-│   │       ├── __init__.py
-│   │       ├── auth.py            # POST /auth/login, /auth/refresh, /auth/logout
-│   │       ├── users.py           # GET/POST/PATCH/DELETE /users
-│   │       └── files.py           # POST /files/upload, GET /files/{key}/url, DELETE /files/{key}
-│   │
-│   ├── core/                      # ── Cross-cutting infrastructure ──
-│   │   ├── __init__.py
-│   │   ├── security.py            # JWT create/verify, password hash/verify (python-jose + passlib)
-│   │   ├── logging.py             # structlog JSON config with request_id processor
-│   │   └── exceptions.py          # AppException hierarchy + global exception handlers
-│   │
-│   ├── db/                        # ── Database connectivity ──
-│   │   ├── __init__.py
-│   │   ├── session.py             # AsyncEngine, AsyncSessionLocal, get_db() dependency
-│   │   └── base.py                # DeclarativeBase, TimestampMixin (created_at, updated_at)
-│   │
-│   ├── models/                    # ── SQLAlchemy ORM models ──
-│   │   ├── __init__.py
-│   │   └── user.py                # User: id, email, hashed_password, is_active, role
-│   │
-│   ├── schemas/                   # ── Pydantic request/response schemas ──
-│   │   ├── __init__.py
-│   │   ├── common.py              # ApiResponse[T] envelope, PageResult[T], success()/error() helpers
-│   │   ├── auth.py                # LoginRequest, TokenResponse, RefreshRequest
-│   │   ├── user.py                # UserCreate, UserUpdate, UserOut
-│   │   └── file.py                # FileUploadResponse, FileMetadata
-│   │
-│   ├── services/                  # ── Business logic layer ──
-│   │   ├── __init__.py
-│   │   ├── auth_service.py        # AuthService: authenticate, refresh, revoke
-│   │   ├── user_service.py        # UserService: CRUD + pagination
-│   │   └── storage_service.py     # StorageService: S3 upload, delete, presigned URL
-│   │
-│   ├── middleware/                 # ── ASGI middleware ──
-│   │   ├── __init__.py
-│   │   ├── logging_middleware.py   # Injects X-Request-ID, logs method/path/status/duration
-│   │   └── cors_middleware.py      # CORS config from ALLOWED_ORIGINS setting
-│   │
-│   └── worker/                    # ── Celery async tasks (optional) ──
-│       ├── __init__.py
-│       ├── celery_app.py          # Celery instance (only created when CELERY_BROKER_URL is set)
-│       └── tasks/
-│           ├── __init__.py
-│           ├── email.py           # send_email_task
-│           └── report.py          # generate_report_task
-│
-├── tests/                         # ── Test scaffold ──
-│   ├── __init__.py
-│   ├── conftest.py                # Fixtures: async_client (httpx + ASGITransport)
-│   ├── test_auth.py               # Auth endpoint test stubs
-│   ├── test_users.py              # User CRUD test stubs
-│   └── test_files.py              # File endpoint test stubs
-│
-└── k8s/                           # ── Kubernetes manifests (production) ──
-    ├── deployment.yaml            # 2-replica Deployment with readiness/liveness probes
-    ├── service.yaml               # ClusterIP Service (80 → 8000)
-    ├── ingress.yaml               # Traefik IngressRoute with TLS
-    ├── configmap.yaml             # Non-sensitive config values
-    ├── secret.yaml                # Sensitive values (base64 placeholders)
-    └── hpa.yaml                   # HorizontalPodAutoscaler (CPU 50%, 2–10 replicas)
-```
-
-## Prerequisites
-
-- **Python >= 3.12** — download from [python.org](https://www.python.org/downloads/)
-- **uv** — fast Python package manager, install with `pip install uv`
-- **PostgreSQL database** — we recommend [Supabase](https://supabase.com) (free tier) for development; no local database install needed
-
-## Quick Start (Development)
-
-The project is designed to start with minimal setup. Redis, MinIO, Celery, and Docker are all optional and can be enabled later when needed.
-
-### Step 1 — Clone and configure environment
-
-```bash
-git clone <repo-url>
-cd apl_backend
-copy .env.example .env        # Windows
-# cp .env.example .env        # macOS / Linux
-```
-
-Open `.env` and set your `DATABASE_URL`. If you're using Supabase, find the connection string at **Supabase Dashboard → Project Settings → Database → Connection string → URI**, then change the protocol prefix:
-
-```
-# Original from Supabase:
-#   postgresql://postgres.xxxxx:password@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres
-#
-# Change postgresql:// to postgresql+asyncpg:// for SQLAlchemy async:
-DATABASE_URL=postgresql+asyncpg://postgres.xxxxx:password@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres
-```
-
-### Step 2 — Install dependencies
-
-```bash
-uv sync
-```
-
-This creates a `.venv` virtual environment and installs all packages. All subsequent commands should use `uv run` to execute within this environment.
-
-### Step 3 — Start the development server
-
-```bash
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-### Step 4 — Verify it works
-
-Open your browser:
-
-| URL | What you'll see |
+| Document | For |
 |---|---|
-| http://localhost:8000/health | `{"status": "ok"}` — confirms the server is running |
-| http://localhost:8000/docs | Swagger UI — interactive API documentation |
-| http://localhost:8000/redoc | ReDoc — alternative API documentation |
+| This README | Developers: running it locally, the codebase, conventions |
+| [DEPLOY.md](DEPLOY.md) | Setting up a new deployment from scratch |
+| [OPERATIONS.md](OPERATIONS.md) | Running it: admins, reviewing, logs, backups, known issues |
+| `https://<api-host>/docs` | Every endpoint, with request and response schemas |
 
-### Step 5 (later) — Run database migrations
+## Stack
 
-When you start building features that need database tables, generate and run migrations:
+Python 3.12 · FastAPI · SQLAlchemy 2 (async) with asyncpg · PostgreSQL ·
+Pydantic 2 · ONNX Runtime and libvips for photo screening · Supabase Storage
+or any S3-compatible storage · SMTP for email · optional Redis · uv for
+dependencies · Docker.
 
-```bash
-# Generate a migration from your models
-uv run alembic revision --autogenerate -m "create users table"
+## API overview
 
-# Apply migrations to the database
-uv run alembic upgrade head
-```
+Everything is under `/api/v1` except the health checks. The full reference,
+with schemas and each endpoint's errors, is at `/docs` and `/redoc` on any
+running instance.
 
-## Environment Variables
+**Authentication.** Send `Authorization: Bearer <access_token>`. Access
+tokens last 30 minutes; renew with `POST /auth/refresh`. Refresh tokens last
+7 days and each works **once**: every refresh returns a new pair. Logout
+revokes both. Roles (`user`, `admin`) are read from the account on every
+request, so a role change applies immediately.
 
-All configuration is managed through the `.env` file. Here's what each variable does:
-
-| Variable | Required | Default | Description |
+| Method | Path | Access | Purpose |
 |---|---|---|---|
-| `APP_NAME` | No | `apl-backend` | Application display name |
-| `DEBUG` | No | `true` | Enable debug mode (auto-reload, verbose errors) |
-| `SECRET_KEY` | **Yes** | `change-me` | Secret for signing JWT tokens — **change in production** |
-| `ALGORITHM` | No | `HS256` | JWT signing algorithm |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `30` | Access token lifetime |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime |
-| `DATABASE_URL` | **Yes** | localhost | PostgreSQL async connection string |
-| `ALLOWED_ORIGINS` | No | `["http://localhost:3000"]` | CORS allowed origins (JSON array) |
-| `REDIS_URL` | No | *(empty)* | Redis connection string — leave empty to skip |
-| `AWS_ACCESS_KEY_ID` | No | *(empty)* | S3/MinIO access key — leave empty to skip |
-| `AWS_SECRET_ACCESS_KEY` | No | *(empty)* | S3/MinIO secret key |
-| `AWS_S3_BUCKET` | No | *(empty)* | S3 bucket name |
-| `AWS_S3_ENDPOINT_URL` | No | *(empty)* | S3 endpoint (set for MinIO, omit for AWS) |
-| `CELERY_BROKER_URL` | No | *(empty)* | Celery broker URL — leave empty to skip |
+| GET | `/health`, `/health/ready` | public | Liveness; readiness (database answers, else `503`) |
+| POST | `/auth/signup`, `/auth/login` | public | Create an account / sign in; returns tokens |
+| POST | `/auth/refresh`, `/auth/logout` | public | New token pair / revoke tokens |
+| GET | `/auth/me`, `/auth/session` | user | The signed-in account |
+| GET | `/plants/`, `/plants/count`, `/plants/{id}` | public | Library, its size, one plant in full |
+| GET | `/plants/search?q=&field=&limit=` | public | Ranked search; `field` narrows to named fields |
+| PATCH, DELETE | `/plants/{id}` | admin | Correct an entry; delete it with its library photos |
+| POST | `/submissions/` | public or user | Submit an observation (multipart, `photos` field) |
+| GET | `/submissions/me`, `/submissions/{id}` | user | Your submissions; one (yours, or any for admins) |
+| PATCH | `/submissions/{id}/content` | user | Edit your pending submission |
+| POST, DELETE | `/submissions/{id}/photos[/{photo_id}]` | user | Add or remove photos while pending |
+| GET | `/submissions/` | admin | Review queue, filterable by status, name, email |
+| PATCH | `/submissions/{id}` | admin | Approve (new or existing plant) or reject |
+| GET | `/users/`, `/users/{id}` | admin | Accounts |
+| PATCH | `/users/{id}/role` | admin | Promote or demote (never the last admin) |
+| PATCH | `/users/me` | user | Change display name |
+| PUT, DELETE | `/users/me/avatar` | user | Set or remove profile picture |
+| GET | `/badges/levels`, `/badges/me` | public, user | Badge ladders; your badges |
+| GET | `/badges/users/{id}` | admin | Anyone's badges |
+| GET, PATCH | `/admin/screening` | admin | Photo-screening thresholds |
 
-## Architecture Overview
+**Submission lifecycle.**
 
 ```
-Client Request
-    │
-    ▼
-┌─────────────────────────────┐
-│  Middleware                  │
-│  (CORS, Request Logging)    │
-└──────────┬──────────────────┘
-           │
-           ▼
-┌─────────────────────────────┐
-│  API Layer (app/api/v1/)    │  ← Routes only, delegates to services
-│  auth.py, users.py, files.py│
-└──────────┬──────────────────┘
-           │
-           ▼
-┌─────────────────────────────┐
-│  Service Layer              │  ← Business logic, validation
-│  (app/services/)            │
-└──────────┬──────────────────┘
-           │
-           ▼
-┌─────────────────────────────┐
-│  Data Layer                 │  ← ORM models, DB session
-│  (app/models/, app/db/)     │
-└──────────┬──────────────────┘
-           │
-           ▼
-      PostgreSQL (Supabase)
+upload ──► pending ──► approved   plant created or extended, photos copied into the
+   │          │                   library, contributor emailed
+   │          └─────► rejected    nothing published, contributor emailed
+   └─ refused at upload (422) if any photo fails screening
 ```
 
-The request flow follows a strict layered pattern: **Routes → Services → Models/DB**. Routes handle HTTP concerns (parsing, response formatting), services contain business logic, and models define the database schema.
+While pending, the contributor can edit the text and add or remove photos;
+each edit changes `content_version`. A reviewer sends back the
+`content_version` they saw as `expected_version`, and a mismatch is refused
+with `409`, so nobody approves content they did not see. Reviewed submissions
+are read-only.
 
-## Common Development Commands
+**Upload limits.** JPEG, PNG or WebP; 10 MB per file (`MAX_UPLOAD_BYTES`);
+1–10 photos per submission. Images over 13 MP are decoded at about 2 MP by
+libvips; over 200 MP they are refused unread. Hosting platforms may cap the
+request as a whole (Cloud Run: 32 MiB, answered with a bare `413`), so the
+app should resize photos to about 2048 px before upload.
+
+## Running it locally
+
+You need Python 3.12 and [uv](https://docs.astral.sh/uv/)
+(`pip install uv`, or see its install guide).
 
 ```bash
-# Start dev server
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-
-# Run tests
-uv run pytest tests/ -v
-
-# Lint and format
-uv run ruff check .
-uv run ruff format .
-
-# Type checking
-uv run mypy app/
-
-# Generate a new migration
-uv run alembic revision --autogenerate -m "describe your change"
-
-# Apply migrations
-uv run alembic upgrade head
-
-# Rollback last migration
-uv run alembic downgrade -1
-
-# Install pre-commit hooks (one-time setup)
-uv run pre-commit install
+uv sync                      # creates .venv with the exact locked versions
+cp .env.example .env         # Windows: copy .env.example .env
 ```
 
-## Production Deployment
+Edit `.env`:
 
-When you're ready to deploy, the project includes full Docker and Kubernetes support.
+- `DEBUG=true` (allows the placeholder `SECRET_KEY` and local CORS origins).
+- `DATABASE_URL`: a PostgreSQL database that has the hand-over schema loaded
+  (DEPLOY.md, section 3). The simplest is the Compose database. Put the
+  schema files in `schema/`, publish its port with a
+  `docker-compose.override.yml` (git-ignored):
 
-### Docker Compose (full stack)
+  ```yaml
+  services:
+    postgres:
+      ports: ["127.0.0.1:5432:5432"]
+  ```
+
+  then run `docker compose up -d postgres` and use
+  `DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/apl_db`.
+- Storage and email are optional locally: without them, uploads are discarded
+  and emails are written to the log.
 
 ```bash
-copy .env.example .env
-# Edit .env with production values (DEBUG=false, real SECRET_KEY, etc.)
-docker-compose up -d
+uv run python -m app.db.migrate                  # apply sql/ (once, and after pulling new ones)
+uv run uvicorn app.main:app --reload --port 8000
 ```
 
-This starts: the FastAPI app, PostgreSQL 16, Redis 7, MinIO, and a Celery worker.
+Open http://localhost:8000/docs. To test from a phone on the same Wi-Fi, run
+uvicorn with `--host 0.0.0.0` and use the computer's LAN address.
 
-### Docker (build image only)
+To run the whole stack in containers instead: `docker compose up -d --build`
+(see DEPLOY.md, option A).
+
+## Checks
+
+CI runs exactly these on every pull request
+([.github/workflows/ci.yml](.github/workflows/ci.yml)); run them before
+pushing:
 
 ```bash
-docker build -t apl-backend:latest .
+uv run ruff check app tests
+uv run ruff format --check app tests     # without --check to fix
+uv run mypy app                          # strict mode
+uv run pytest                            # no database or network needed
 ```
 
-The Dockerfile uses multi-stage builds: a `builder` stage installs dependencies with `uv`, then a slim `runtime` stage copies only the virtual environment and app code. The final image runs as a non-root user with Gunicorn + Uvicorn workers.
+`uv run pre-commit install` runs the first three on every commit.
 
-### Kubernetes
+## Codebase
 
-```bash
-kubectl apply -f k8s/
+```
+app/
+├── main.py              App factory: middleware, error handlers, routers, /health, /health/ready
+├── config.py            Every setting, read from the environment / .env (documented inline)
+├── dependencies.py      Auth dependencies: get_current_user, get_optional_user, require_admin
+├── api/v1/              HTTP layer only: parse, call a service, wrap the result
+│   ├── auth.py          signup, login, refresh, logout, session, me
+│   ├── plants.py        browse, count, search, detail; admin edit and delete
+│   ├── submissions.py   create, own list, edit, photos; admin queue and review
+│   ├── users.py         own name and avatar; admin user list and roles
+│   ├── badges.py        contributor tree and reviewer badges
+│   └── admin.py         photo-screening thresholds
+├── services/            Business logic; one class per area (PlantService, SubmissionService, ...)
+│   └── storage_service.py   Supabase Storage / S3 behind one interface
+├── models/              SQLAlchemy ORM models (tables: plants_v2, plant_images_v2,
+│                        submissions, submission_images, app_users, screening_thresholds)
+├── schemas/             Pydantic request/response models; common.py has the response envelope
+├── core/                Security (JWT, bcrypt), exceptions, structured logging,
+│                        rate limiting, token revocation
+├── middleware/          CORS, request logging with X-Request-ID
+├── ml/                  The plant classifier and its ONNX weights (see app/ml/README.md)
+└── db/
+    ├── session.py       Engine and sessions (commit on success, rollback on error)
+    ├── migrate.py       `python -m app.db.migrate`: applies sql/, checks storage
+    └── migrate_images.py  `python -m app.db.migrate_images`: moves photos to new storage
+sql/                     Schema changes on top of the hand-over schema, applied in order
+schema/                  Where the hand-over schema SQL goes for Docker Compose (not committed)
+tests/                   pytest suite
+cloudbuild.yaml          Google Cloud Build: build → migrate → deploy to Cloud Run
+docker-compose.yml       Self-hosted stack: API, PostgreSQL, Redis, MinIO
 ```
 
-The `k8s/` directory provides a production-ready manifest set: Deployment (2 replicas with health probes), ClusterIP Service, Traefik IngressRoute with TLS, ConfigMap, Secret (base64 placeholders), and HPA that scales from 2 to 10 pods at 50% CPU utilization.
+### Conventions
 
-## API Response Format
+- **Layers.** Routes stay thin; logic goes in a service; services take an
+  `AsyncSession`. The session commits when the request succeeds and rolls
+  back on any exception, so a service never commits half a change.
+- **Response envelope.** Every endpoint returns
+  `{"code": <int>, "message": <str>, "data": <payload or null>}`, errors
+  included (`ApiResponse[T]`). Lists are paginated as
+  `{"items": [...], "total", "page", "page_size"}` (`PageResult[T]`).
+- **Errors.** Raise the `AppException` subclasses in `app/core/exceptions.py`
+  (`NotFoundError`, `ConflictError`, ...); the handlers turn them into the
+  envelope with the right status code.
+- **Schema changes** are plain SQL files in `sql/`, written to be safe to run
+  twice; see OPERATIONS.md.
+- **Settings** are added to `app/config.py` with a comment saying what they
+  are for, and to `.env.example`.
+- **Comments explain why.** Much of the code records the incident or
+  constraint behind a decision; keep that up when changing it.
 
-All endpoints return a unified `ApiResponse[T]` envelope:
+### Background
 
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": { ... }
-}
-```
-
-Paginated endpoints wrap results in `PageResult[T]`:
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "items": [...],
-    "total": 100,
-    "page": 1,
-    "page_size": 20
-  }
-}
-```
-
-Error responses follow the same structure:
-
-```json
-{
-  "code": 404,
-  "message": "Resource not found",
-  "data": null
-}
-```
+The mobile app first talked to Supabase directly. This backend replaced that
+with a REST API and its own authentication, which is why users live in
+`app_users` rather than Supabase's `auth.users`. Search ranking is done in
+Python (`_score_match` in `app/services/plant_service.py`) to keep the app's
+original ordering.
 
 ## License
 
