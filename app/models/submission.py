@@ -21,9 +21,7 @@ class Submission(Base):
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     contributor_name: Mapped[str] = mapped_column(Text, nullable=False)
     contributor_email: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    submitted_at: Mapped[datetime] = mapped_column(
-        server_default=func.now(), nullable=False
-    )
+    submitted_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     user_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     location_state: Mapped[str | None] = mapped_column(Text, nullable=True)

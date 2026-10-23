@@ -183,9 +183,7 @@ def _is_owner(submission: Submission, user: User) -> bool:
     return submission.contributor_email.lower() == user.email.lower()
 
 
-async def _load_for_user(
-    service: SubmissionService, submission_id: UUID, user: User
-) -> Submission:
+async def _load_for_user(service: SubmissionService, submission_id: UUID, user: User) -> Submission:
     """Fetch a submission the caller is allowed to see.
 
     A stranger gets 404 rather than 403: answering 'forbidden' would confirm
@@ -445,9 +443,7 @@ async def add_submission_photos(
     return ApiResponse.success(data=out)
 
 
-@router.delete(
-    "/{submission_id}/photos/{photo_id}", response_model=ApiResponse[SubmissionOut]
-)
+@router.delete("/{submission_id}/photos/{photo_id}", response_model=ApiResponse[SubmissionOut])
 async def delete_submission_photo(
     submission_id: UUID,
     photo_id: UUID,
@@ -476,8 +472,7 @@ async def delete_submission_photo(
 
     if await service.count_photos(submission_id) <= 1:
         raise UnprocessableError(
-            "A submission must keep at least one photo. Add a replacement before "
-            "removing this one."
+            "A submission must keep at least one photo. Add a replacement before removing this one."
         )
 
     updated = await service.delete_photo(submission_id, photo_id)
@@ -491,7 +486,9 @@ async def delete_submission_photo(
 
 @router.get("/", response_model=ApiResponse[PageResult[SubmissionOut]])
 async def list_all_submissions(
-    status: SubmissionStatus | None = Query(None, description="Filter: pending, approved, or rejected."),
+    status: SubmissionStatus | None = Query(
+        None, description="Filter: pending, approved, or rejected."
+    ),
     contributor_name: str | None = Query(None, description="Case-insensitive substring match."),
     contributor_email: str | None = Query(None, description="Case-insensitive substring match."),
     page: int = Query(1, ge=1),

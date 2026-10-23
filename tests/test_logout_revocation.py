@@ -115,9 +115,7 @@ async def test_logout_leaves_other_sessions_alone(async_client: AsyncClient) -> 
     phone = create_access_token(CLAIMS)
     laptop = create_access_token(CLAIMS)
 
-    await async_client.post(
-        "/api/v1/auth/logout", headers={"Authorization": f"Bearer {phone}"}
-    )
+    await async_client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {phone}"})
 
     still_valid = await async_client.get(
         "/api/v1/auth/me", headers={"Authorization": f"Bearer {laptop}"}

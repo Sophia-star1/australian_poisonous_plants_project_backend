@@ -60,6 +60,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+# UP046 asks for PEP 695 generics (`class ApiResponse[T](BaseModel)`). The
+# envelope models parametrise every response schema FastAPI publishes; the
+# rewrite buys nothing at runtime and is not worth the risk to the OpenAPI
+# output.
+ignore = ["UP046"]
 
 [tool.ruff.lint.flake8-bugbear]
 # B008 warns about function calls in argument defaults, which is precisely how
@@ -102,7 +107,9 @@ module = ["onnxruntime.*", "pyvips.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# aioboto3 and botocore ship no type information (stubs exist as separate,
-# heavyweight packages). Only app/services/storage_service.py imports them.
-module = ["aioboto3", "aioboto3.*", "botocore", "botocore.*"]
+# These ship no type information; stubs exist only as separate packages.
+# aioboto3/botocore: only app/services/storage_service.py imports them.
+# jose: app/core/security.py, whose wrappers declare the types they return.
+# yaml: app/ml/classifier.py reads one small config file.
+module = ["aioboto3", "botocore.*", "jose", "yaml"]
 ignore_missing_imports = true

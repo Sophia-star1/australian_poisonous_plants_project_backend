@@ -74,7 +74,7 @@ class RedisDenylist:
     def __init__(self, url: str) -> None:
         import redis.asyncio as redis  # imported lazily: optional dependency
 
-        self._redis = redis.from_url(url, decode_responses=True)
+        self._redis = redis.Redis.from_url(url, decode_responses=True)
 
     async def revoke(self, jti: str, ttl_seconds: int) -> None:
         """Mark `jti` as revoked for the remainder of its lifetime."""

@@ -40,9 +40,7 @@ async def test_signup_conflict_does_not_confirm_the_address(
 
     service = AuthService(db=None)  # type: ignore[arg-type]
     with pytest.raises(Exception) as excinfo:
-        await service.sign_up(
-            SignUpRequest(email="taken@example.com", password="a-valid-password")
-        )
+        await service.sign_up(SignUpRequest(email="taken@example.com", password="a-valid-password"))
 
     message = str(getattr(excinfo.value, "detail", excinfo.value))
     assert "already registered" not in message.lower()
@@ -94,7 +92,8 @@ async def test_disabled_account_is_anonymous_to_optional_dependency(
     monkeypatch.setattr(dependencies.UserService, "get_by_id", _disabled)
 
     result = await dependencies.get_optional_user(
-        token=create_access_token({"sub": "1"}), db=None  # type: ignore[arg-type]
+        token=create_access_token({"sub": "1"}),
+        db=None,  # type: ignore[arg-type]
     )
     assert result is None
 

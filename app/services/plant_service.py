@@ -102,12 +102,17 @@ def _toxicity_ilike(like: str) -> ColumnExpressionArgument[bool]:
     it as toxic. `notes` is matched on its value instead, since it is prose.
     """
     kv = func.jsonb_each_text(Plant.toxicity_by_species).table_valued("key", "value").alias("tox")
-    return select(1).select_from(kv).where(
-        or_(
-            and_(kv.c.value == TOXIC, kv.c.key.ilike(like, escape="\\")),
-            and_(kv.c.key == "notes", kv.c.value.ilike(like, escape="\\")),
+    return (
+        select(1)
+        .select_from(kv)
+        .where(
+            or_(
+                and_(kv.c.value == TOXIC, kv.c.key.ilike(like, escape="\\")),
+                and_(kv.c.key == "notes", kv.c.value.ilike(like, escape="\\")),
+            )
         )
-    ).exists()
+        .exists()
+    )
 
 
 def _toxin_profile_ilike(like: str) -> ColumnExpressionArgument[bool]:
@@ -117,9 +122,7 @@ def _toxin_profile_ilike(like: str) -> ColumnExpressionArgument[bool]:
     `primary_class` and `secondary_class`.
     """
     kv = func.jsonb_each_text(Plant.toxin_profile).table_valued("key", "value").alias("prof")
-    return (
-        select(1).select_from(kv).where(kv.c.value.ilike(like, escape="\\")).exists()
-    )
+    return select(1).select_from(kv).where(kv.c.value.ilike(like, escape="\\")).exists()
 
 
 def _build_search_filters(like: str) -> dict[str, ColumnExpressionArgument[bool]]:
@@ -197,9 +200,7 @@ class PlantService:
 
     async def list_plants(self, limit: int | None = None) -> Sequence[Plant]:
         stmt = (
-            select(Plant)
-            .options(selectinload(Plant.images))
-            .order_by(Plant.botanical_name.asc())
+            select(Plant).options(selectinload(Plant.images)).order_by(Plant.botanical_name.asc())
         )
         if limit is not None:
             stmt = stmt.limit(limit)
@@ -291,11 +292,7 @@ class PlantService:
         return kept
 
     async def get_plant(self, plant_id: int) -> Plant | None:
-        stmt = (
-            select(Plant)
-            .options(selectinload(Plant.images))
-            .where(Plant.id == plant_id)
-        )
+        stmt = select(Plant).options(selectinload(Plant.images)).where(Plant.id == plant_id)
         result = await self.db.execute(stmt)
         return result.scalars().first()
 

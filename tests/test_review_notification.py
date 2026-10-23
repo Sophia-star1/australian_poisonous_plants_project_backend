@@ -231,14 +231,18 @@ def test_the_outcome_is_built_from_plain_values() -> None:
 
 def test_a_rejection_carries_no_plant_name() -> None:
     outcome = ReviewOutcome.from_review(
-        type("S", (), {
-            "contributor_name": "Ada",
-            "contributor_email": "a@b.com",
-            "status": "rejected",
-            "submitted_at": datetime(2026, 1, 1, tzinfo=UTC),
-            "user_description": None,
-            "reviewer_notes": None,
-        })(),  # type: ignore[arg-type]
+        type(
+            "S",
+            (),
+            {
+                "contributor_name": "Ada",
+                "contributor_email": "a@b.com",
+                "status": "rejected",
+                "submitted_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "user_description": None,
+                "reviewer_notes": None,
+            },
+        )(),  # type: ignore[arg-type]
         None,
     )
     assert outcome.botanical_name is None

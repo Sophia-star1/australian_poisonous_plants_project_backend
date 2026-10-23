@@ -1,6 +1,6 @@
 """JWT token management and password hashing utilities."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -17,12 +17,10 @@ REFRESH_TOKEN_TYPE = "refresh"
 
 def _now() -> datetime:
     """Return an aware UTC `datetime` (separate helper for easier mocking)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _build_token(
-    data: dict[str, Any], expires_delta: timedelta, token_type: str
-) -> str:
+def _build_token(data: dict[str, Any], expires_delta: timedelta, token_type: str) -> str:
     """Encode the given claims into a signed JWT.
 
     Every token gets a unique `jti` so it can be revoked individually; see
@@ -30,23 +28,18 @@ def _build_token(
     """
     to_encode: dict[str, Any] = {**data}
     expire = _now() + expires_delta
-    to_encode.update(
-        {"exp": expire, "iat": _now(), "type": token_type, "jti": str(uuid4())}
-    )
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    to_encode.update({"exp": expire, "iat": _now(), "type": token_type, "jti": str(uuid4())})
+    token: str = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return token
 
 
-def create_access_token(
-    data: dict[str, Any], expires_delta: int | None = None
-) -> str:
+def create_access_token(data: dict[str, Any], expires_delta: int | None = None) -> str:
     """Generate a signed JWT access token."""
     delta = timedelta(minutes=expires_delta or settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return _build_token(data, delta, token_type=ACCESS_TOKEN_TYPE)
 
 
-def create_refresh_token(
-    data: dict[str, Any], expires_delta: int | None = None
-) -> str:
+def create_refresh_token(data: dict[str, Any], expires_delta: int | None = None) -> str:
     """Generate a signed JWT refresh token."""
     delta = timedelta(days=expires_delta or settings.REFRESH_TOKEN_EXPIRE_DAYS)
     return _build_token(data, delta, token_type=REFRESH_TOKEN_TYPE)

@@ -95,9 +95,7 @@ async def sign_up(
     * `422` — malformed address, or a password outside the length bounds.
     * `429` — 5 attempts per 5 minutes, counted per client address.
     """
-    await _enforce_rate_limit(
-        "signup", [f"ip:{_client_ip(request)}"], settings.SIGNUP_RATE_LIMIT
-    )
+    await _enforce_rate_limit("signup", [f"ip:{_client_ip(request)}"], settings.SIGNUP_RATE_LIMIT)
     tokens = await AuthService(db).sign_up(payload)
     return ApiResponse.success(data=tokens, message="Account created.")
 
@@ -197,9 +195,7 @@ async def get_session(
     from calling Supabase directly. `GET /auth/me` returns the same user
     without the session wrapper.
     """
-    return ApiResponse.success(
-        data=SessionResponse(user=UserOut.model_validate(current_user))
-    )
+    return ApiResponse.success(data=SessionResponse(user=UserOut.model_validate(current_user)))
 
 
 @router.get("/me", response_model=ApiResponse[UserOut])

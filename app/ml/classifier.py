@@ -374,9 +374,7 @@ class PlantClassifier:
 
         meta = yaml.safe_load(meta_path.read_text()) if meta_path.exists() else {}
         self.size = int(meta.get("img_size", 224))
-        self.reject_below = (
-            settings.PLANT_REJECT_BELOW if reject_below is None else reject_below
-        )
+        self.reject_below = settings.PLANT_REJECT_BELOW if reject_below is None else reject_below
         self.accept_at = settings.PLANT_ACCEPT_AT if accept_at is None else accept_at
         if not 0.0 <= self.reject_below <= self.accept_at <= 1.0:
             raise ValueError(

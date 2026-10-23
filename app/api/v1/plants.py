@@ -50,9 +50,7 @@ async def list_plants(
     `limit` caps the rows returned, up to 500; omit it for all of them.
     """
     rows = await PlantService(db).list_plants(limit=limit)
-    return ApiResponse.success(
-        data=[PlantSummary.model_validate(row) for row in rows]
-    )
+    return ApiResponse.success(data=[PlantSummary.model_validate(row) for row in rows])
 
 
 # Declared ahead of `/{plant_id}`, which would otherwise take "count" as an id
@@ -71,9 +69,7 @@ async def count_plants(db: AsyncSession = Depends(get_db)) -> ApiResponse[PlantC
 @router.get("/search", response_model=ApiResponse[list[PlantSummary]])
 async def search_plants(
     q: str = Query("", description="Free-text query string."),
-    limit: int = Query(
-        SEARCH_DEFAULT_LIMIT, ge=1, le=100, description="Max rows returned."
-    ),
+    limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=100, description="Max rows returned."),
     field: str | None = Query(
         None,
         description="Comma-separated field names to search. Leave empty to search all fields. "
@@ -117,9 +113,7 @@ async def search_plants(
             )
 
     rows = await PlantService(db).search_plants(q, limit=limit, fields=fields)
-    return ApiResponse.success(
-        data=[PlantSummary.model_validate(row) for row in rows]
-    )
+    return ApiResponse.success(data=[PlantSummary.model_validate(row) for row in rows])
 
 
 @router.get("/{plant_id}", response_model=ApiResponse[PlantDetail])

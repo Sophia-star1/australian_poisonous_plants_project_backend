@@ -65,9 +65,10 @@ def content_fingerprint(
         _number(longitude),
     ]
     # Sorted: the order rows come back in is not part of what changed.
-    parts += [f"{pid}:{int(primary)}" for pid, primary in sorted(
-        ((str(pid), bool(primary)) for pid, primary in photos)
-    )]
+    parts += [
+        f"{pid}:{int(primary)}"
+        for pid, primary in sorted(((str(pid), bool(primary)) for pid, primary in photos))
+    ]
     joined = "\x1f".join(parts).encode()
     return hashlib.blake2b(joined, digest_size=8).hexdigest()
 

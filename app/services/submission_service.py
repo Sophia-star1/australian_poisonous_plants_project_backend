@@ -15,7 +15,7 @@ Admin endpoints (`GET /submissions/`, `GET /submissions/{id}`,
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -166,9 +166,7 @@ class Screening:
     @property
     def is_plant(self) -> bool:
         """`ai_is_plant`: true only when every photo is a confident plant."""
-        return bool(self.per_photo) and all(
-            v.decision is Decision.ACCEPT for v in self.per_photo
-        )
+        return bool(self.per_photo) and all(v.decision is Decision.ACCEPT for v in self.per_photo)
 
     @property
     def weakest(self) -> float:
@@ -414,9 +412,7 @@ class SubmissionService:
                 )
             )
 
-        total = await self.db.scalar(
-            select(func.count(Submission.id)).where(*conditions)
-        )
+        total = await self.db.scalar(select(func.count(Submission.id)).where(*conditions))
 
         offset = (filters.page - 1) * filters.page_size
         stmt = (
@@ -577,9 +573,7 @@ class SubmissionService:
         self.db.expire_all()
         return await self.get_by_id(submission_id)
 
-    async def add_photos(
-        self, submission_id: UUID, photos: list[UploadFile]
-    ) -> Submission | None:
+    async def add_photos(self, submission_id: UUID, photos: list[UploadFile]) -> Submission | None:
         """Attach more photos to a pending submission.
 
         Guarded the same way as `update_content`: the status is re-checked in
@@ -653,9 +647,7 @@ class SubmissionService:
             .values(ai_is_plant=merged.is_plant, ai_top_matches=merged.as_record())
         )
 
-    async def delete_photo(
-        self, submission_id: UUID, photo_id: UUID
-    ) -> Submission | None:
+    async def delete_photo(self, submission_id: UUID, photo_id: UUID) -> Submission | None:
         """Remove one photo from a pending submission.
 
         Promotes another image to primary if the deleted one held that flag,
@@ -775,7 +767,7 @@ class SubmissionService:
                 status=payload.status,
                 reviewer_notes=payload.reviewer_notes,
                 reviewed_by=reviewed_by,
-                reviewed_at=datetime.now(timezone.utc),
+                reviewed_at=datetime.now(UTC),
             )
             .returning(Submission.id)
         )
