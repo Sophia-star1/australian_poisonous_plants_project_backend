@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -32,6 +33,14 @@ READINESS_TIMEOUT_SECONDS = 10.0
 #: Values `SECRET_KEY` takes when nobody has set it: the default in
 #: `config.py`, the one in `.env.example`, and nothing at all.
 _PLACEHOLDER_SECRETS = frozenset({"", "change-me", "change-me-to-a-random-secret"})
+
+
+def app_version() -> str:
+    """The version in pyproject.toml, as installed; shown in /docs."""
+    try:
+        return version("apl-backend")
+    except PackageNotFoundError:  # running from a tree that was never installed
+        return "unknown"
 
 
 def refuse_placeholder_secret() -> None:
@@ -78,6 +87,7 @@ def create_app() -> FastAPI:
 
     application = FastAPI(
         title=settings.APP_NAME,
+        version=app_version(),
         debug=settings.DEBUG,
         lifespan=lifespan,
     )

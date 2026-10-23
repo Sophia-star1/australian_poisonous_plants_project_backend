@@ -1,9 +1,14 @@
+# Pinned so a rebuild cannot silently change the platform under the app:
+# Python 3.12 on Debian 13 (security patches still flow in through the tag),
+# and uv exactly, because it must match the version that writes uv.lock
+# (see .github/workflows/ci.yml). Bump them deliberately.
+
 # ---------- builder ----------
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim-trixie AS builder
 
 WORKDIR /build
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -12,7 +17,7 @@ COPY . .
 RUN uv sync --frozen --no-dev
 
 # ---------- runtime ----------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim-trixie AS runtime
 
 RUN groupadd -r app && useradd -r -g app -d /app -s /sbin/nologin app
 
