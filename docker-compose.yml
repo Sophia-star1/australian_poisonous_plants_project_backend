@@ -1,17 +1,24 @@
-# A complete self-hosted stack: the API, PostgreSQL, Redis and RustFS (S3-
-# compatible photo storage). See DEPLOY.md, "Option A: Docker Compose".
+# A complete self-hosted stack: the API, PostgreSQL, Redis, RustFS (S3-
+# compatible photo storage) and, on a server, Caddy for automatic HTTPS.
+# Step-by-step guides: docs/run-on-your-computer.md and
+# docs/deploy-on-your-own-server.md.
 #
 # Before the first `docker compose up -d --build`:
-#   1. cp .env.example .env and fill in the "Docker Compose stack" section
-#      (POSTGRES_PASSWORD, STORAGE_ACCESS_KEY, STORAGE_SECRET_KEY,
-#      PUBLIC_MEDIA_URL) plus SECRET_KEY and, for email, SMTP_*. Compose
-#      refuses to start while a required one is missing. The database,
-#      Redis and storage settings below override anything in .env.
+#   1. Copy .env.example to .env and fill in the "Docker Compose stack"
+#      section plus SECRET_KEY (and SMTP_* for email). Compose refuses to
+#      start while a required value is missing. The database, Redis and
+#      storage settings below override anything else in .env.
 #   2. Put the database schema SQL files from the hand-over into ./schema/,
 #      named so they sort in the order they must run (01_..., 02_...).
 #      PostgreSQL runs them once, when its data volume is first created.
 #
+# On a server, COMPOSE_PROFILES=https in .env also starts Caddy, which gets
+# HTTPS certificates for API_DOMAIN and MEDIA_DOMAIN by itself.
+#
 # Image versions are pinned; bump them deliberately.
+
+# Fixed, so volume and network names do not depend on the folder's name.
+name: apl-backend
 
 x-app-env: &app-env
   DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/apl_db
@@ -27,8 +34,9 @@ x-app-env: &app-env
 services:
   app:
     build: .
+    # This computer only. From outside, the API is reached through Caddy.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     env_file:
       - .env
     environment: *app-env
@@ -88,8 +96,9 @@ services:
       RUSTFS_ADDRESS: 0.0.0.0:9000
       RUSTFS_VOLUMES: /data
       RUSTFS_CONSOLE_ENABLE: "false"
+    # This computer only. From outside, photos are served through Caddy.
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     volumes:
       - storagedata:/data
     depends_on:
@@ -129,6 +138,51 @@ services:
         s3 s3api put-bucket-policy --bucket apl-media --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::apl-media/*"]}]}'
         echo "bucket apl-media ready"
 
+  # HTTPS in front of the API and the photos, with certificates from Let's
+  # Encrypt obtained and renewed automatically. Only on a server: started
+  # when COMPOSE_PROFILES=https, and needs API_DOMAIN and MEDIA_DOMAIN to
+  # point at this machine. See deploy/Caddyfile.
+  caddy:
+    image: caddy:2.11.7
+    profiles: ["https"]
+    depends_on:
+      - app
+      - storage
+    environment:
+      API_DOMAIN: ${API_DOMAIN:-}
+      MEDIA_DOMAIN: ${MEDIA_DOMAIN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$API_DOMAIN" ] || [ -z "$$MEDIA_DOMAIN" ]; then
+          echo "Set API_DOMAIN and MEDIA_DOMAIN in .env first."; exit 1
+        fi
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    restart: unless-stopped
+
+  # Copies every photo into ${BACKUP_DIR}/photos (only what changed since the
+  # last run). Not a running service: deploy/backup.sh starts it.
+  photo-backup:
+    image: amazon/aws-cli:2.38.5
+    profiles: ["backup"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY in .env}
+      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY in .env}
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ${BACKUP_DIR:-./backups}/photos:/backup
+    command: ["s3", "sync", "s3://apl-media", "/backup", "--endpoint-url", "http://storage:9000", "--only-show-errors"]
+
 volumes:
   pgdata:
   storagedata:
+  caddydata:
+  caddyconfig:

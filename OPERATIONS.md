@@ -3,6 +3,10 @@
 Day-to-day running of a deployed backend. Setting one up is in
 [DEPLOY.md](DEPLOY.md).
 
+> **Looking for click-by-click instructions?** See
+> [docs/everyday-tasks.md](docs/everyday-tasks.md). This page is the
+> background reference.
+
 Every admin action below is an API call. The interactive documentation at
 `https://<api-host>/docs` is the easiest way to make one: call
 `POST /api/v1/auth/login`, copy the `access_token` from the response, click
@@ -196,8 +200,10 @@ pg_dump --format=custom --no-owner "postgresql://USER:PASSWORD@HOST:5432/DBNAME"
 pg_restore --no-owner --dbname="postgresql://USER:PASSWORD@HOST:5432/NEWDB" apl-YYYY-MM-DD.dump
 ```
 
-With Docker Compose: `docker compose exec postgres pg_dump -U postgres
---format=custom apl_db > apl-$(date +%F).dump`.
+With Docker Compose, `sh deploy/backup.sh` does both the database and the
+photos (see the server guide, section 16, for scheduling and restoring).
+The database part alone: `docker compose exec -T postgres pg_dump -U
+postgres --format=custom apl_db > apl-$(date +%F).dump`.
 
 **Photos.** Turn on object versioning where the service offers it (S3, R2,
 RustFS), or copy the bucket elsewhere periodically, e.g. with
