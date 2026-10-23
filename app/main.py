@@ -61,17 +61,12 @@ def refuse_placeholder_secret() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
     refuse_placeholder_secret()
-
-    if settings.redis_enabled:
-        pass  # TODO: initialize Redis connection pool
-
-    if settings.storage_enabled:
-        pass  # TODO: initialize S3 client
-
+    # Redis needs no setup here: the rate limiter and the token denylist each
+    # connect on first use and log which backend they chose. Storage is
+    # resolved per request; logging the choice once makes a misconfigured
+    # deployment visible at a glance.
+    logger.info("storage_backend", backend=settings.storage_backend)
     yield
-
-    if settings.redis_enabled:
-        pass  # TODO: close Redis connection pool
 
 
 def create_app() -> FastAPI:

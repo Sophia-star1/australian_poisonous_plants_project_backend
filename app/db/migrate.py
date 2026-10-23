@@ -41,8 +41,14 @@ SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
 #: Arbitrary, fixed: every migration run takes the same advisory lock.
 MIGRATION_LOCK = 52_710_009
 
-#: Buckets the code expects to exist and serve public URLs.
-PUBLIC_BUCKETS = (settings.SUPABASE_AVATAR_BUCKET,)
+#: Buckets the code expects to exist and serve public URLs: all three, so a
+#: fresh Supabase project needs none created by hand. With S3 they are key
+#: prefixes and the check only confirms the one physical bucket exists.
+PUBLIC_BUCKETS = (
+    settings.SUPABASE_SUBMISSION_BUCKET,
+    settings.SUPABASE_PLANT_BUCKET,
+    settings.SUPABASE_AVATAR_BUCKET,
+)
 
 _LEDGER = """
 CREATE TABLE IF NOT EXISTS schema_migrations (

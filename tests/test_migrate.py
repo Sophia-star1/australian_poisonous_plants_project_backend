@@ -156,7 +156,13 @@ async def test_main_migrates_through_the_apps_own_engine(
     assert await migrate.main() == 0
 
     assert conn.ledger == {"001_a.sql", "002_b.sql", "003_c.sql"}
-    assert calls == ["connection closed", "engine disposed", "bucket avatars"]
+    assert calls == [
+        "connection closed",
+        "engine disposed",
+        "bucket submission-images",
+        "bucket plant-images-v2",
+        "bucket avatars",
+    ]
 
 
 # ── buckets ──────────────────────────────────────────────────────────────────

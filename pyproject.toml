@@ -103,3 +103,9 @@ build-backend = "hatchling.build"
 # this the import alone is an error, which buries the errors that matter.
 module = ["onnxruntime.*", "pyvips.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# aioboto3 and botocore ship no type information (stubs exist as separate,
+# heavyweight packages). Only app/services/storage_service.py imports them.
+module = ["aioboto3", "aioboto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
