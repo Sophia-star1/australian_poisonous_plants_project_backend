@@ -31,7 +31,7 @@ Day-to-day running (admins, logs, backups, known issues) is in
 |---|---|---|
 | PostgreSQL 15 or later | Yes | Self-hosted, a managed service (AWS RDS, Google Cloud SQL, Azure, ...) or Supabase. |
 | The database schema SQL files | Yes | Supplied separately with the hand-over, **not** in this repository. They create the tables and load the plant library. |
-| Photo storage | Yes, in practice | Supabase Storage, or any S3-compatible service: AWS S3, Cloudflare R2, MinIO, Backblaze B2, ... Without it the API runs but **discards every uploaded photo**. |
+| Photo storage | Yes, in practice | Supabase Storage, or any S3-compatible service: AWS S3, Cloudflare R2, Backblaze B2, a self-hosted RustFS, ... Without it the API runs but **discards every uploaded photo**. |
 | An SMTP mailbox | No | Sends contributors the outcome of their submission. Without it the API logs the mail instead of sending it. |
 | A host for one container | Yes | Linux server with Docker, Cloud Run, AWS App Runner/ECS, Azure Container Apps, Fly.io, Render, ... 1 GiB of memory. |
 | A domain with HTTPS | Yes, for production | The mobile app should talk to the API over HTTPS. |
@@ -100,10 +100,19 @@ schema. Apply them with:
 python -m app.db.migrate
 ```
 
+- **First it checks the hand-over schema is there**: if any of `plants_v2`,
+  `plant_images_v2`, `submissions`, `submission_images` or `app_users` is
+  missing it stops with `schema_missing` in the log, naming them, and changes
+  nothing.
 - Each file runs once, in filename order, and is recorded in a
   `schema_migrations` table. Every script is written so that running it on a
   database that already has the change does nothing, so it does not matter
   whether the hand-over export already includes them.
+- **It moves id sequences that an import left behind.** Data imported with
+  explicit ids leaves each table's id sequence at its start, and the next new
+  account or plant would fail with a duplicate key. Each sequence is moved
+  past the largest id in use (logged as `id_sequence_moved`); a sequence is
+  never moved backwards.
 - It also makes sure the photo storage is ready (section 4).
 - It is safe to run on every deploy, and every option in section 8 does. Two
   runs at once wait for each other.
@@ -146,7 +155,7 @@ public is a decision for a person; flip it to public in the dashboard.
 The service-role key bypasses all of Supabase's access rules. Keep it on the
 server only, never in the mobile app or website.
 
-### Option 2: S3-compatible storage (AWS S3, Cloudflare R2, MinIO, ...)
+### Option 2: S3-compatible storage (AWS S3, Cloudflare R2, RustFS, ...)
 
 One bucket holds everything; the logical buckets become key prefixes in it
 (`avatars/users/7/3f2a....jpg`).
@@ -170,9 +179,10 @@ the final public address, a CDN or custom domain if you use one.
 |---|---|---|---|
 | AWS S3 | *(empty)* | `https://<bucket>.s3.<region>.amazonaws.com` or a CloudFront domain | Turn off "Block public access" for the bucket and add the policy below, or put CloudFront in front. |
 | Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | Your R2 public bucket URL or custom domain | Bucket → Settings → Public access (custom domain or r2.dev). |
-| MinIO | `http://minio:9000` (or its address) | `https://<public-host>/<bucket>` | `mc anonymous set download <alias>/<bucket>` |
+| RustFS or another self-hosted server (the Compose stack) | `http://storage:9000` (or its address) | `https://<public-host>/<bucket>` | The bucket policy below, set with `aws s3api put-bucket-policy`; the Compose stack does this itself. |
 
-AWS bucket policy for anonymous reads (objects only, no listing):
+Bucket policy for anonymous reads (objects only, no listing); the same JSON
+works for any service that supports S3 bucket policies:
 
 ```json
 {
@@ -225,6 +235,18 @@ from wherever the API's environment variables are set; with Docker Compose:
 
 ```bash
 docker compose run --rm app python -m app.db.migrate_images
+```
+
+**Photo metadata.** Every photo it copies loses its metadata on the way: the
+GPS position, time and device a phone records (see
+[OPERATIONS.md](OPERATIONS.md#photo-privacy)). Photos uploaded before the
+backend removed metadata itself may still carry a contributor's location. If
+you keep the existing storage instead of moving, clean them where they are
+(URLs do not change):
+
+```bash
+python -m app.db.migrate_images --strip-in-place --dry-run   # count them
+python -m app.db.migrate_images --strip-in-place
 ```
 
 - **Run it while the old URLs still work.** It cannot copy a photo that is gone.
@@ -285,6 +307,7 @@ a `.env` file that is never committed), not in code or in a build file.
 | `REDIS_URL` | When running more than one instance | Usually | Shares login rate limits and signed-out tokens between instances. Without it each instance keeps its own in memory, which is correct for a single instance. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES`, `REFRESH_TOKEN_EXPIRE_DAYS` | No | | Session lengths (30 minutes / 7 days). |
 | `LOGIN_RATE_LIMIT`, `SIGNUP_RATE_LIMIT`, `RATE_LIMIT_WINDOW_SECONDS` | No | | Attempts per IP and per account (10 / 5 per 300 s). |
+| `SUBMISSION_RATE_LIMIT`, `SUBMISSION_RATE_LIMIT_WINDOW_SECONDS` | No | | Photo uploads (new submissions and added photos) per IP, and per account when signed in: 20 per hour. Over it the API answers `429` with `Retry-After`. |
 | `MAX_UPLOAD_BYTES`, `ALLOWED_IMAGE_TYPES` | No | | 10 MB; JPEG, PNG, WebP. |
 | `PLANT_CLASSIFIER_ENABLED` | No | | `false` turns off the "is this a plant?" photo check. Thresholds are set at runtime by an admin ([OPERATIONS.md](OPERATIONS.md#photo-screening-thresholds)). |
 | `CONTRIBUTOR_TREE_STAGES`, `REVIEWER_BADGE_TIERS` | No | | Badge thresholds; see `.env.example`. The reviewer tiers are still placeholders. |
@@ -310,35 +333,37 @@ API documentation is served by the API itself at `/docs` (Swagger UI) and
 ### Option A: Docker Compose (one server)
 
 [`docker-compose.yml`](docker-compose.yml) runs everything on one machine:
-the API, PostgreSQL, Redis and MinIO for photos.
+the API, PostgreSQL, Redis and [RustFS](https://github.com/rustfs/rustfs)
+(Apache-2.0, S3-compatible) for photos.
 
 ```bash
 git clone <repository-url> apl-backend && cd apl-backend
 cp .env.example .env
-# Edit .env: SECRET_KEY, SMTP_*, EMAIL_FROM, ALLOWED_ORIGINS.
-#   Also add (choose your own values):
-#     POSTGRES_PASSWORD=...
-#     MINIO_ROOT_USER=...
-#     MINIO_ROOT_PASSWORD=...
-#     PUBLIC_MEDIA_URL=https://media.example.org/apl-media
+# Edit .env: SECRET_KEY, SMTP_*, EMAIL_FROM, ALLOWED_ORIGINS, and the
+# "Docker Compose stack" section: POSTGRES_PASSWORD, STORAGE_ACCESS_KEY,
+# STORAGE_SECRET_KEY (letters and digits) and
+# PUBLIC_MEDIA_URL=https://media.example.org/apl-media
 cp /path/to/handover/*.sql schema/
 docker compose up -d --build
 docker compose logs -f migrate app
 ```
 
-On the first start PostgreSQL imports `schema/*.sql`, `minio-init` creates the
-`apl-media` bucket with public read access, `migrate` applies `sql/`, then the
-API starts on port 8000.
+On the first start PostgreSQL imports `schema/*.sql`; `storage-init` creates
+the `apl-media` bucket and makes its objects publicly readable; `migrate`
+checks the schema, applies `sql/` and fixes id sequences; then the API starts
+on port 8000. Compose refuses to start while one of the required values is
+missing from `.env`. `schema/*.sql` is git-ignored: an export holds real
+user data and must not be committed.
 
 Put a reverse proxy with HTTPS in front (Caddy, nginx, Traefik), forwarding:
 
 - `https://api.example.org` → `localhost:8000` (the API)
-- `https://media.example.org` → `localhost:9000` (MinIO, photos); this is
+- `https://media.example.org` → `localhost:9000` (RustFS, photos); this is
   the host in `PUBLIC_MEDIA_URL`
 
-Do not expose MinIO's console (port 9001) to the internet. PostgreSQL and
-Redis are not published on host ports at all; use `docker compose exec
-postgres psql -U postgres apl_db` to reach the database.
+PostgreSQL and Redis are not published on host ports at all; use `docker
+compose exec postgres psql -U postgres apl_db` to reach the database. Only
+port 9000 of the storage is published, and its admin console is off.
 
 To use Supabase or an external database or S3 service instead, delete the
 matching values from the `environment:` block in `docker-compose.yml` (they
@@ -475,7 +500,9 @@ with branch `^dev$` (or `^main$`) and configuration file `cloudbuild.yaml`.
 | Container exits at start: "SECRET_KEY is unset or still a placeholder" | Set `SECRET_KEY` (section 7). |
 | `/health` is fine, `/health/ready` is 503 | Database unreachable: wrong `DATABASE_URL`, firewall, TLS requirement (`?ssl=require`), or a paused free-tier database. The log line `readiness_check_failed` has the cause. |
 | "Could not parse SQLAlchemy URL" | The URL is not `postgresql+asyncpg://...`, or the password has an unencoded `@`, `:` or `/`. |
-| `migrate` fails with "relation ... does not exist" | The hand-over schema was not imported first (section 3.1). |
+| `migrate` fails with `schema_missing` or "relation ... does not exist" | The hand-over schema was not imported first, or lacks a table (section 3.1). |
+| A new sign-up or plant fails with "duplicate key value violates unique constraint ..._pkey" | An id sequence is behind the imported data. Run `python -m app.db.migrate`, which moves it. |
+| Uploads answer `429` | The upload limit (section 7). Raise `SUBMISSION_RATE_LIMIT` if legitimate use hits it. |
 | `migrate` fails with "S3 bucket ... is not reachable" | The bucket does not exist, the keys are wrong, or the endpoint/region is wrong. |
 | Errors mentioning "prepared statement" on Supabase | `DATABASE_URL` uses the pooler but not the `pooler.supabase.com` host the backend detects; use the pooler string exactly as Supabase gives it. |
 | Uploads succeed but photos never appear | The log says `storage_backend_disabled`: storage settings missing (section 4). |

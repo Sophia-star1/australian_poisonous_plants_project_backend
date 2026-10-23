@@ -14,7 +14,7 @@ The backend is chosen by `settings.storage_backend` (STORAGE_BACKEND):
   service-role key, which bypasses row level security and must stay
   server-side; it is never returned to a client. Public URLs are
   ``<SUPABASE_URL>/storage/v1/object/public/<bucket>/<key>``.
-* **S3** (AWS S3, Cloudflare R2, MinIO, ...) — one physical bucket,
+* **S3** (AWS S3, Cloudflare R2, RustFS, MinIO, ...) — one physical bucket,
   AWS_S3_BUCKET, with each logical bucket as a key prefix, so nothing depends
   on bucket names being free (AWS bucket names are global). Public URLs are
   ``<S3_PUBLIC_BASE_URL>/<bucket>/<key>``; making them readable (a bucket

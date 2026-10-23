@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     #: a warning). Set it explicitly to make a misconfiguration fail loudly.
     STORAGE_BACKEND: Literal["auto", "supabase", "s3"] = "auto"
 
-    # S3-compatible storage (AWS S3, Cloudflare R2, MinIO, ...). One bucket
+    # S3-compatible storage (AWS S3, Cloudflare R2, RustFS, ...). One bucket
     # holds everything; the three logical buckets below become key prefixes in
     # it, e.g. `avatars/users/7/<random>.jpg`.
     AWS_ACCESS_KEY_ID: str = ""
@@ -88,14 +88,14 @@ class Settings(BaseSettings):
     #: The one physical bucket. Must already exist.
     AWS_S3_BUCKET: str = ""
     #: Only for non-AWS services, e.g. https://<account>.r2.cloudflarestorage.com
-    #: or http://minio:9000. Empty means AWS itself.
+    #: or http://storage:9000. Empty means AWS itself.
     AWS_S3_ENDPOINT_URL: str = ""
     #: e.g. ap-southeast-2. R2 uses "auto".
     AWS_REGION: str = ""
     #: Public base URL where the bucket's objects can be read, without a trailing
     #: slash: `<S3_PUBLIC_BASE_URL>/<key>` must serve the object at `<key>`.
     #: e.g. https://<bucket>.s3.<region>.amazonaws.com, an R2 public domain, a
-    #: CDN in front of the bucket, or http://minio:9000/<bucket>. The bucket
+    #: CDN in front of the bucket, or http://<host>:9000/<bucket>. The bucket
     #: (or the CDN) must allow anonymous reads; the app writes the URLs it
     #: stores from this.
     S3_PUBLIC_BASE_URL: str = ""

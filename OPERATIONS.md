@@ -15,6 +15,7 @@ Every admin action below is an API call. The interactive documentation at
 - [Reviewing submissions](#reviewing-submissions)
 - [Managing the plant library](#managing-the-plant-library)
 - [Photo screening thresholds](#photo-screening-thresholds)
+- [Photo privacy](#photo-privacy)
 - [Logs and monitoring](#logs-and-monitoring)
 - [Backups](#backups)
 - [Secrets](#secrets)
@@ -132,6 +133,29 @@ Lowering `reject_below` refuses fewer honest close-ups (bark, seeds, dried
 specimens) but lets more non-plant photos through to reviewers. To turn
 screening off entirely, set `PLANT_CLASSIFIER_ENABLED=false` and redeploy.
 
+## Photo privacy
+
+A phone records the GPS position, time and device in every photo, and every
+photo here is served from a public URL. So:
+
+- **Contributed photos** lose that metadata before they are stored. Only the
+  metadata goes: the image data is copied unchanged, and the orientation is
+  kept so portrait photos still display upright.
+- **Avatars** are re-encoded as a small JPEG with no metadata at all.
+- **Photos stored before this was in place** (in the original deployment)
+  may still carry a contributor's location. Clean them once, where they are;
+  their URLs do not change:
+
+  ```bash
+  python -m app.db.migrate_images --strip-in-place --dry-run   # how many
+  python -m app.db.migrate_images --strip-in-place
+  ```
+
+  Moving photos to new storage (DEPLOY.md, section 5) cleans them on the way.
+- The location a contributor *types or shares* in the app (`latitude`,
+  `longitude`, `location_state`) is stored on the submission, shown to
+  reviewers, and never included in the public plant API.
+
 ## Logs and monitoring
 
 The API writes one JSON object per line to standard output; your platform
@@ -149,6 +173,10 @@ Useful events to search for:
 | `email_sent` / `email_send_failed` / `email_send_error` | Review emails. |
 | `readiness_check_failed` | The database did not answer `/health/ready`. |
 | `migration_applied`, `migrations_done` | Deploy-time migrations. |
+| `schema_missing` | The deploy stopped: the hand-over schema is not in the database (DEPLOY.md, section 3.1). |
+| `id_sequence_moved` | A table's id sequence was behind its data (normal once, after an import). |
+| `image_moved`, `image_metadata_stripped`, `image_migration_done` | `python -m app.db.migrate_images`. |
+| `rate_limiter_backend` | At startup: whether limits are shared through Redis or kept per instance. |
 | `unhandled_exception` | A bug: a request failed with 500. |
 
 Monitoring: point an uptime checker at `GET /health/ready` (200 when the API
@@ -172,7 +200,7 @@ With Docker Compose: `docker compose exec postgres pg_dump -U postgres
 --format=custom apl_db > apl-$(date +%F).dump`.
 
 **Photos.** Turn on object versioning where the service offers it (S3, R2,
-MinIO), or copy the bucket elsewhere periodically, e.g. with
+RustFS), or copy the bucket elsewhere periodically, e.g. with
 [rclone](https://rclone.org) `rclone sync`. Supabase Storage has no backup
 of its own; copy the three buckets with rclone through Supabase's
 S3-compatible endpoint.
@@ -200,6 +228,9 @@ reason.
   without row-level security. Enable RLS on `app_users`, `submissions`,
   `submission_images` and any other table (Table Editor → table → RLS). The
   backend connects as the table owner, so RLS does not affect it.
+- **Clean the photos uploaded before metadata was removed**:
+  `python -m app.db.migrate_images --strip-in-place` (see
+  [Photo privacy](#photo-privacy)).
 - An earlier version of `DEPLOY.md` contained the original database's
   connection string, password included, and it remains in git history.
   **Change that database password** if the database is still in use.
@@ -279,9 +310,11 @@ takes two deploys: first code that no longer uses it, then the migration.
 - **No email verification.** Anyone can register with an address they do not
   own. Submissions sent signed out under that address then appear in that
   account.
-- **Client IP for rate limiting** is the first `X-Forwarded-For` entry, which
-  a client can set itself. Behind a known proxy, use the address the proxy
-  appends instead (`_client_ip` in `app/api/v1/auth.py`).
+- **Client IP for rate limiting** (login, sign-up, uploads) is the first
+  `X-Forwarded-For` entry, which a client can set itself; the per-account
+  limits are what a determined client cannot dodge. Behind a known proxy,
+  use the address the proxy appends instead (`client_ip` in
+  `app/core/rate_limit.py`).
 - **`GET /plants/` is not paginated** (it takes a `limit`). Fine at the
   current ~100 plants; add paging as the library grows.
 - **Library photos are managed per plant, not per photo.** There are no

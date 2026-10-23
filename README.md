@@ -82,10 +82,13 @@ with `409`, so nobody approves content they did not see. Reviewed submissions
 are read-only.
 
 **Upload limits.** JPEG, PNG or WebP; 10 MB per file (`MAX_UPLOAD_BYTES`);
-1–10 photos per submission. Images over 13 MP are decoded at about 2 MP by
-libvips; over 200 MP they are refused unread. Hosting platforms may cap the
-request as a whole (Cloud Run: 32 MiB, answered with a bare `413`), so the
-app should resize photos to about 2048 px before upload.
+1–10 photos per submission; 20 upload requests per hour per IP and per
+account (`SUBMISSION_RATE_LIMIT`, then `429`). Images over 13 MP are decoded
+at about 2 MP by libvips; over 200 MP they are refused unread. Hosting
+platforms may cap the request as a whole (Cloud Run: 32 MiB, answered with a
+bare `413`), so the app should resize photos to about 2048 px before upload.
+Photos are stored without their GPS and other metadata
+(`app/services/photo_metadata.py`).
 
 ## Running it locally
 
@@ -157,7 +160,8 @@ app/
 │   ├── badges.py        contributor tree and reviewer badges
 │   └── admin.py         photo-screening thresholds
 ├── services/            Business logic; one class per area (PlantService, SubmissionService, ...)
-│   └── storage_service.py   Supabase Storage / S3 behind one interface
+│   ├── storage_service.py   Supabase Storage / S3 behind one interface
+│   └── photo_metadata.py    Removes GPS and other metadata from uploaded photos
 ├── models/              SQLAlchemy ORM models (tables: plants_v2, plant_images_v2,
 │                        submissions, submission_images, app_users, screening_thresholds)
 ├── schemas/             Pydantic request/response models; common.py has the response envelope
@@ -173,7 +177,7 @@ sql/                     Schema changes on top of the hand-over schema, applied 
 schema/                  Where the hand-over schema SQL goes for Docker Compose (not committed)
 tests/                   pytest suite
 cloudbuild.yaml          Google Cloud Build: build → migrate → deploy to Cloud Run
-docker-compose.yml       Self-hosted stack: API, PostgreSQL, Redis, MinIO
+docker-compose.yml       Self-hosted stack: API, PostgreSQL, Redis, RustFS (S3)
 ```
 
 ### Conventions
