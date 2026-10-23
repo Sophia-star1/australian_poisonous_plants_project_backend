@@ -45,6 +45,7 @@ from fastapi import UploadFile
 
 from app.config import settings
 from app.core.logging import get_logger
+from app.services.photo_metadata import MalformedImageError, strip_metadata
 
 logger = get_logger(__name__)
 
@@ -331,9 +332,21 @@ class StorageService:
     async def upload_file(
         self, file: UploadFile, key: str, bucket: str | None = None
     ) -> StoredFile:
-        """Read `file` and store it at `key`."""
+        """Read a contributed photo and store it at `key`, minus its metadata.
+
+        The photo's GPS position, time and device details are removed before
+        it is stored (see `photo_metadata`): it is served from a public URL,
+        and joins the public library if approved. The pixels are untouched.
+
+        Raises:
+            StorageError: too large, empty, or a JPEG/PNG/WebP whose structure
+                is broken; or the storage backend failed.
+        """
         target = bucket or settings.SUPABASE_SUBMISSION_BUCKET
-        data = await self.read_upload(file)
+        try:
+            data = strip_metadata(await self.read_upload(file))
+        except MalformedImageError as exc:
+            raise StorageError("The photo is not a readable image.") from exc
         return await self.upload_bytes(
             data, key, target, file.content_type or "application/octet-stream"
         )
