@@ -143,6 +143,21 @@ def test_morphology_stays_open() -> None:
     assert stored["growth_form"] == "climber_herbaceous"
 
 
+def test_a_blank_extra_morphology_key_is_left_out() -> None:
+    """Regression: blank extra keys were stored as "".
+
+    Blank answers are cleared so they become "not recorded", but the clearing
+    only walked the declared fields, so an extra key sent blank published an
+    empty string.
+    """
+    identification = _identification(
+        morphological_attributes={"growth_form": "tree", "rhizome": "   "}
+    )
+    assert identification.morphological_attributes is not None
+    stored = identification.morphological_attributes.model_dump(exclude_none=True)
+    assert stored == {"growth_form": "tree"}
+
+
 def test_morphology_accepts_the_v2_numeric_height() -> None:
     """The curated rows store `height_m` as a number, not a string."""
     identification = _identification(morphological_attributes={"height_m": 1.5})

@@ -144,75 +144,164 @@ def test_undecodable_bytes_raise_a_named_error() -> None:
 
 # ── decode budget ────────────────────────────────────────────────────────────
 #
-# The budget is shrunk in these tests rather than the images grown: building a
-# real 144-megapixel bomb costs the test run the very memory being guarded.
+# The limits are shrunk in these tests rather than the images grown: building
+# a real 144-megapixel bomb costs the test run the very memory being guarded.
 
 
-def _jpeg_bytes(image: Image.Image) -> bytes:
+@pytest.fixture
+def small_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budgets small enough that a 200x200 image exercises the big-image paths."""
+    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 10_000)
+    monkeypatch.setattr(mod, "SHRINK_TARGET_PIXELS", 2_500)
+    monkeypatch.setattr(mod, "MAX_SOURCE_PIXELS", 1_000_000)
+
+
+def _encoded(image: Image.Image, fmt: str, **kwargs: Any) -> bytes:
     buffer = io.BytesIO()
-    image.save(buffer, "JPEG", quality=95)
+    image.save(buffer, fmt, **kwargs)
     return buffer.getvalue()
 
 
-def test_a_png_over_the_budget_is_refused_before_decoding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The header alone is enough to say no; no pixel is decoded."""
-    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 10_000)
-    decoded: list[Any] = []
-    monkeypatch.setattr(mod.ImageOps, "exif_transpose", lambda im: decoded.append(im))
+def _shrink_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Record every hand-off to libvips, still letting it run."""
+    calls: list[tuple[int, int]] = []
+    real = mod._shrink_with_vips
 
+    def _spy(vips: Any, data: bytes, width: int, height: int) -> Image.Image:
+        calls.append((width, height))
+        return real(vips, data, width, height)
+
+    monkeypatch.setattr(mod, "_shrink_with_vips", _spy)
+    return calls
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "WEBP", "JPEG"])
+def test_an_image_over_the_budget_is_shrunk_not_refused(
+    small_limits: None, monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """PNG and WebP used to be refused here; only JPEG could be decoded smaller."""
+    calls = _shrink_calls(monkeypatch)
+    data = _encoded(_gradient(200, 200, 1), fmt)
+
+    opened = mod.open_within_budget(data)
+
+    assert calls == [(200, 200)]
+    assert opened.width * opened.height <= 2_500 * 1.05
+    assert preprocess(data, SIZE).shape == (1, 3, SIZE, SIZE)
+
+
+def test_a_photo_within_the_budget_never_reaches_libvips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ordinary photos keep the Pillow path, bit-identical to the training transform."""
+    calls = _shrink_calls(monkeypatch)
+    preprocess(_png(_gradient(300, 200, 2)), SIZE)
+    assert calls == []
+
+
+def test_beyond_the_source_limit_nothing_is_decoded(
+    small_limits: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """libvips bounds memory, not time: a huge PNG still inflates every row."""
+    monkeypatch.setattr(mod, "MAX_SOURCE_PIXELS", 30_000)
+    calls = _shrink_calls(monkeypatch)
     with pytest.raises(ImageTooLargeError, match="megapixels"):
-        preprocess(_png(_gradient(200, 200, 1)), SIZE)
-    assert decoded == []
+        preprocess(_png(_gradient(200, 200, 3)), SIZE)
+    assert calls == []
 
 
-def test_a_jpeg_over_the_budget_is_decoded_at_a_reduced_scale(
-    monkeypatch: pytest.MonkeyPatch,
+def test_past_pillows_own_guard_the_size_is_read_by_libvips(
+    small_limits: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """libjpeg scales during decoding, so a big JPEG never exists at full size."""
-    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 20_000)
-    sizes: list[tuple[int, int]] = []
-    real = mod.ImageOps.exif_transpose
+    """Above ~179 MP `Image.open` raises before reporting a size at all.
 
-    def _spy(image: Image.Image) -> Image.Image | None:
-        sizes.append(image.size)
-        return real(image)
+    That used to escape as a 500, then became a refusal; now the declared
+    size is read by libvips and the image shrunk like any other.
 
-    monkeypatch.setattr(mod.ImageOps, "exif_transpose", _spy)
-
-    batch = preprocess(_jpeg_bytes(_gradient(400, 400, 2)), SIZE)
-
-    assert batch.shape == (1, 3, SIZE, SIZE)
-    (decoded,) = sizes
-    assert decoded[0] * decoded[1] <= 20_000
-    assert decoded == (100, 100)  # 1/4 is the first scale under budget
-
-
-def test_a_jpeg_too_large_even_at_one_eighth_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 100)
-    with pytest.raises(ImageTooLargeError):
-        preprocess(_jpeg_bytes(_gradient(400, 400, 3)), SIZE)
-
-
-def test_pillows_own_bomb_guard_is_a_named_error_not_a_500(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Above ~179 MP Pillow raises DecompressionBombError from `Image.open`.
-
-    That is not an OSError or a ValueError, so it escaped every handler and a
-    24 KB file produced a 500.
+    Only `Image.open` is made to raise: lowering `MAX_IMAGE_PIXELS` itself
+    would also trip on the small images built after the shrink.
     """
-    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1_000)
+
+    def _bomb(*args: Any, **kwargs: Any) -> Image.Image:
+        raise Image.DecompressionBombError("Image size exceeds limit")
+
+    monkeypatch.setattr(mod.Image, "open", _bomb)
+    data = _png(_gradient(200, 200, 4))
+
+    assert preprocess(data, SIZE).shape == (1, 3, SIZE, SIZE)
+
+    monkeypatch.setattr(mod, "MAX_SOURCE_PIXELS", 30_000)
     with pytest.raises(ImageTooLargeError):
-        preprocess(_png(_gradient(100, 100, 4)), SIZE)
+        preprocess(data, SIZE)
 
 
-def test_a_photo_within_the_budget_takes_the_unchanged_path() -> None:
-    """A standard 12.2 MP phone photo must stay on the bit-identical path."""
+def test_exif_orientation_is_applied_on_the_libvips_path_too(
+    small_limits: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sideways phone photo must reach the model upright either way."""
+    exif = Image.Exif()
+    exif[274] = 6  # rotate 90° clockwise to display
+    data = _encoded(_gradient(400, 200, 5), "JPEG", exif=exif, quality=95)
+
+    opened = mod.open_within_budget(data)
+    assert opened.height > opened.width, "came back on its side"
+    assert opened.getexif().get(274, 1) == 1, "orientation would be applied twice"
+
+    shrunk = preprocess(data, SIZE)
+    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 10**9)  # Pillow at full size
+    reference = preprocess(data, SIZE)
+    monkeypatch.setattr(mod, "MAX_DECODE_PIXELS", 10**9)
+    sideways = preprocess(_encoded(_gradient(400, 200, 5), "JPEG", quality=95), SIZE)
+    assert np.abs(shrunk - reference).mean() < 0.1
+    assert np.abs(sideways - reference).mean() > 0.5, "the comparison cannot tell rotations apart"
+
+
+def test_transparency_is_kept_for_the_caller_to_flatten(small_limits: None) -> None:
+    rgba = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    assert mod.open_within_budget(_png(rgba)).mode == "RGBA"
+
+
+@pytest.mark.parametrize(("mode", "colour"), [("I;16", 40_000), ("L", 128), ("P", 3)])
+def test_odd_pixel_formats_come_back_as_8_bit(small_limits: None, mode: str, colour: int) -> None:
+    """16-bit and greyscale PNGs are what Pillow-only code tends to trip on."""
+    data = _png(Image.new(mode, (200, 200), colour))
+    opened = mod.open_within_budget(data)
+    assert np.asarray(opened).dtype == np.uint8
+    assert preprocess(data, SIZE).shape == (1, 3, SIZE, SIZE)
+
+
+def test_a_truncated_large_file_is_refused_not_padded(small_limits: None) -> None:
+    """libvips would otherwise fill the missing rows with grey and carry on."""
+    whole = _encoded(_gradient(200, 200, 6), "JPEG", quality=95)
+    with pytest.raises(UndecodableImageError):
+        preprocess(whole[: len(whole) // 2], SIZE)
+
+
+def test_without_libvips_pillow_alone_still_handles_jpeg(
+    small_limits: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken install degrades to what Pillow can do instead of failing uploads."""
+    monkeypatch.setattr(mod, "_vips", lambda: None)
+
+    jpeg = mod.open_within_budget(_encoded(_gradient(200, 200, 7), "JPEG"))
+    assert jpeg.width * jpeg.height <= 10_000  # libjpeg's own reduced decode
+
+    with pytest.raises(ImageTooLargeError):
+        mod.open_within_budget(_png(_gradient(200, 200, 7)))
+
+
+def test_libvips_keeps_no_operation_cache() -> None:
+    """Its cache would keep every upload's bytes and pixels alive after the request."""
+    vips = mod._vips()
+    assert vips is not None, "pyvips is a dependency; this checkout cannot load it"
+    assert vips.cache_get_max() == 0
+
+
+def test_the_limits_keep_ordinary_photos_whole_and_leave_room_downstream() -> None:
+    """12.2 MP phone photos stay on the bit-identical path, and a shrunk 4:3
+    image still has a short side the avatar (512) and the model (257) can use."""
     assert mod.MAX_DECODE_PIXELS >= 4032 * 3024
+    assert mod.SHRINK_TARGET_PIXELS <= mod.MAX_DECODE_PIXELS < mod.MAX_SOURCE_PIXELS
+    short_side = (mod.SHRINK_TARGET_PIXELS * 3 / 4) ** 0.5
+    assert short_side >= 512
 
 
 # ── grading ──────────────────────────────────────────────────────────────────
@@ -300,24 +389,26 @@ def test_repeated_calls_agree() -> None:
 
 
 @model_required
-def test_a_blank_frame_is_not_accepted_but_is_not_refused_either() -> None:
+def test_a_blank_frame_is_refused_at_the_default_floor() -> None:
     """Documents a real limit rather than asserting a hope.
 
-    A plain white frame scores about 0.32 — above the refusal floor, so it is
-    let through and flagged. The specimen photograph in this project's own
-    library that the model is certain about scores 0.0000 and *is* refused.
-    The ordering is therefore wrong for this purpose: no single cutoff
-    separates blank frames from legitimate specimen shots.
+    A plain white frame scores about 0.32. Under the old 0.10 floor it was let
+    through and flagged, as were screenshots (0.24–0.49), which is why the
+    floor is now 0.50. The ordering is still wrong for this purpose: several
+    genuine plant photographs in this project's library score lower than the
+    blank frame (0.17–0.20, one specimen shot 0.0000), so the same floor
+    refuses them too. No single cutoff separates blank frames from
+    legitimate specimen shots.
 
-    The refusal band is still worth having because the model was trained
-    against food, dogs and faces, which is what casual misuse actually looks
-    like. But it is not a general "is this rubbish" detector, and this test
-    exists so nobody later assumes it is.
+    The model was trained against food, dogs and faces; it is not a general
+    "is this rubbish" detector. This test exists so nobody later assumes it
+    is, and so that lowering the floor far enough to let blank frames back
+    through is a visible decision.
     """
     classifier = PlantClassifier()
     blank = classifier.classify(_png(Image.new("RGB", (400, 400), (255, 255, 255))))
-    assert blank.decision is Decision.FLAG
-    assert blank.confidence > classifier.reject_below
+    assert blank.decision is Decision.REJECT
+    assert blank.confidence < classifier.reject_below
 
 
 # ── availability ─────────────────────────────────────────────────────────────

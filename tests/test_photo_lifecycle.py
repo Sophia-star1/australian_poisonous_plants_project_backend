@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.config import settings
 from app.models.submission import Submission, SubmissionImage
@@ -45,11 +46,13 @@ class FakeSession:
         self.deleted: list[Any] = []
         self.image = image
         self.pending = True
+        self.statements: list[Any] = []
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
 
     async def execute(self, statement: Any) -> Any:
+        self.statements.append(statement)
         pending = self.pending
 
         class _Result:
@@ -109,6 +112,9 @@ def service(monkeypatch: pytest.MonkeyPatch) -> Any:
             "app.services.submission_service.StorageService.delete_file", _delete_file
         )
         monkeypatch.setattr(SubmissionService, "get_by_id", _get_by_id)
+        # FakeUpload carries no bytes, and screening added photos is covered
+        # in test_submission_screening.py; these tests are about storage keys.
+        monkeypatch.setattr("app.services.submission_service.get_classifier", lambda: None)
         return SubmissionService(session), calls  # type: ignore[arg-type]
 
     return _build
@@ -177,6 +183,37 @@ async def test_deleting_a_legacy_row_does_not_crash(service: Any) -> None:
     svc, calls = service(FakeSession(image=image))
     await svc.delete_photo(SUBMISSION_ID, PHOTO_ID)
     assert calls["deletes"][0]["key"] == "submissions/legacy.jpg"
+
+
+def _guard_sql(session: FakeSession) -> str:
+    """The first statement a photo change runs: its status guard."""
+    return str(session.statements[0].compile(dialect=postgresql.dialect()))
+
+
+@pytest.mark.asyncio
+async def test_adding_photos_waits_for_a_review_in_progress(service: Any) -> None:
+    """The guard locks the row a reviewer holds, instead of reading past it.
+
+    A plain SELECT does not wait for a lock, so a photo added while a review
+    was being decided slipped in after the reviewer's version check.
+    """
+    session = FakeSession()
+    svc, _ = service(session)
+    await svc.add_photos(SUBMISSION_ID, [FakeUpload()])
+    assert _guard_sql(session).rstrip().endswith("FOR UPDATE")
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_photo_waits_for_a_review_in_progress(service: Any) -> None:
+    image = SubmissionImage()
+    image.id = PHOTO_ID
+    image.submission_id = SUBMISSION_ID
+    image.image_url = PUBLIC_URL
+    image.is_primary = False
+    session = FakeSession(image=image)
+    svc, _ = service(session)
+    await svc.delete_photo(SUBMISSION_ID, PHOTO_ID)
+    assert _guard_sql(session).rstrip().endswith("FOR UPDATE")
 
 
 @pytest.mark.asyncio

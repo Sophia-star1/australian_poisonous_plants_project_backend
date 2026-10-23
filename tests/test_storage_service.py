@@ -116,8 +116,7 @@ async def test_upload_posts_to_supabase(capture: Any) -> None:
     )
     assert recorder["content"] == b"bytes"
     assert result.url == (
-        "https://proj.supabase.co/storage/v1/object/public/"
-        "submission-images/submissions/a/b.jpg"
+        "https://proj.supabase.co/storage/v1/object/public/submission-images/submissions/a/b.jpg"
     )
 
 
@@ -187,8 +186,10 @@ async def test_copy_failure_raises(capture: Any) -> None:
     capture(status=404)
     with pytest.raises(StorageError, match="HTTP 404"):
         await StorageService().copy_object(
-            source_key="a", destination_key="b",
-            source_bucket="submission-images", destination_bucket="plant-images",
+            source_key="a",
+            destination_key="b",
+            source_bucket="submission-images",
+            destination_bucket="plant-images",
         )
 
 
@@ -277,8 +278,10 @@ async def test_transport_failure_becomes_a_storage_error(
 
     with pytest.raises(StorageError, match="Storage request failed"):
         await StorageService().copy_object(
-            source_key="a", destination_key="b",
-            source_bucket="submission-images", destination_bucket="plant-images",
+            source_key="a",
+            destination_key="b",
+            source_bucket="submission-images",
+            destination_bucket="plant-images",
         )
 
 

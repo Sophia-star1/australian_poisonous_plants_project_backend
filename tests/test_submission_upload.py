@@ -86,15 +86,11 @@ def uploads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Record every upload the service performs instead of making one."""
     seen: list[dict[str, Any]] = []
 
-    async def _upload_file(
-        self: Any, file: Any, key: str, bucket: str | None = None
-    ) -> StoredFile:
+    async def _upload_file(self: Any, file: Any, key: str, bucket: str | None = None) -> StoredFile:
         seen.append({"key": key, "bucket": bucket, "filename": file.filename})
         return StoredFile(key=key, url=f"https://proj.supabase.co/{bucket}/{key}")
 
-    monkeypatch.setattr(
-        "app.services.submission_service.StorageService.upload_file", _upload_file
-    )
+    monkeypatch.setattr("app.services.submission_service.StorageService.upload_file", _upload_file)
     return seen
 
 
@@ -240,9 +236,7 @@ async def test_storage_failure_does_not_create_a_submission(
     async def _boom(self: Any, *args: Any, **kwargs: Any) -> StoredFile:
         raise StorageError("Upload failed with HTTP 500.")
 
-    monkeypatch.setattr(
-        "app.services.submission_service.StorageService.upload_file", _boom
-    )
+    monkeypatch.setattr("app.services.submission_service.StorageService.upload_file", _boom)
     response = await async_client.post(
         "/api/v1/submissions/", data=_form(), files={"photos": _photo()}
     )

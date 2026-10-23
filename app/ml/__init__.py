@@ -9,7 +9,7 @@ The pieces live apart on purpose:
 * `classifier.py` — loading the model and running it. Pure functions over
   bytes; no FastAPI, no database, so it can be exercised from a script.
 * `weights/`      — the model files themselves. Under `app/` because the
-  runtime image only copies `app/`, `alembic/` and `alembic.ini`; a directory
+  runtime image only copies `app/` and `sql/`; a directory
   at the repository root would be left out of the deployed container.
 
 Nothing here imports from `app.api` or `app.services`. The dependency runs one

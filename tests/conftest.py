@@ -3,7 +3,18 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.core.rate_limit import reset_rate_limiter
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limits() -> None:
+    """Rate-limit counters start empty in every test.
+
+    The limiter is a process-wide singleton, so without this the uploads made
+    by one test would use up the budget of the next.
+    """
+    reset_rate_limiter()
 
 
 @pytest.fixture

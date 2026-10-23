@@ -154,4 +154,3 @@ class AuthService:
         if not await get_denylist().consume(jti, seconds_until(claims.get("exp"))):
             raise UnauthorizedError("Invalid or expired refresh token.")
         return self._issue_tokens(user)
-

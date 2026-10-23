@@ -3,7 +3,7 @@
 from collections.abc import Awaitable, Callable
 
 from fastapi import Depends
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ForbiddenError, UnauthorizedError
@@ -14,7 +14,22 @@ from app.models.user import User
 from app.schemas.role import UserRole
 from app.services.user_service import UserService
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+#: Declared as plain HTTP bearer auth. It was an OAuth2 password flow, which
+#: made the /docs "Authorize" dialog POST the credentials as a form to
+#: /auth/login — an endpoint that takes JSON — so signing in there always
+#: failed with 422. Now the dialog takes the token itself: call POST
+#: /api/v1/auth/login, copy `access_token`, paste it in.
+_bearer = HTTPBearer(
+    auto_error=False,
+    description="The access_token returned by POST /api/v1/auth/login.",
+)
+
+
+async def bearer_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> str | None:
+    """The token from an `Authorization: Bearer ...` header, or None."""
+    return credentials.credentials if credentials else None
 
 
 async def _reject_if_revoked(claims: dict[str, object]) -> bool:
@@ -28,7 +43,7 @@ async def _reject_if_revoked(claims: dict[str, object]) -> bool:
 
 
 async def get_current_user(
-    token: str | None = Depends(oauth2_scheme),
+    token: str | None = Depends(bearer_token),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Extract and validate the current user from the JWT token."""
@@ -65,7 +80,7 @@ async def get_current_active_user(
 
 
 async def get_optional_user(
-    token: str | None = Depends(oauth2_scheme),
+    token: str | None = Depends(bearer_token),
     db: AsyncSession = Depends(get_db),
 ) -> User | None:
     """Return the current user if a valid token was supplied, otherwise `None`.

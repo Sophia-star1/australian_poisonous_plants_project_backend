@@ -105,6 +105,23 @@ class PlantDetail(PlantSummary):
     toxic_to_animals: list[str]
 
 
+class PlantCount(BaseModel):
+    """Served by `GET /plants/count`."""
+
+    total: int = Field(description="Number of plants in the library.")
+
+
+class PlantDeleted(BaseModel):
+    """Served by `DELETE /plants/{id}`."""
+
+    id: int
+    #: Photos removed from this project's plant bucket.
+    photos_deleted: int
+    #: Image URLs not removed: hosted elsewhere, or a storage delete that
+    #: failed (logged). Their rows are gone either way.
+    photos_not_deleted: list[str] = Field(default_factory=list)
+
+
 class PlantSearchQuery(BaseModel):
     """Query-string container documenting the search endpoint."""
 

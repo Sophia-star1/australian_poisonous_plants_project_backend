@@ -76,23 +76,28 @@ up to 0.06, comfortably enough to move a photo across a threshold.
 | setting                     | default | meaning                              |
 | --------------------------- | ------- | ------------------------------------ |
 | `PLANT_CLASSIFIER_ENABLED`  | `true`  | off switch                           |
-| `PLANT_REJECT_BELOW`        | `0.10`  | under this the upload is refused     |
+| `PLANT_REJECT_BELOW`        | `0.50`  | under this the upload is refused     |
 | `PLANT_ACCEPT_AT`           | `0.70`  | at or over this it counts as a plant |
 
-`0.10` rejects 1 of the 104 library images rather than 7. It is a floor for
-obvious rubbish, not a real plant detector.
+`PLANT_REJECT_BELOW` was `0.10`, which rejected 1 of the 104 library images,
+but ordinary non-plants landed above it and were accepted: screenshots scored
+0.24–0.49 and a blank frame about 0.32. At `0.50` those are refused, at the
+cost of 6 of the 104 library images (5.8%) — the specimen shots, bark
+close-ups and non-green parts described above. Because every photo in a
+submission must pass, an honest submission's chance of being refused grows
+with its photo count. Lower the variable to trade back; it needs no code
+change.
 
 `get_classifier()` returns `None` when the weights are absent or the feature is
 off, and callers read that as "no opinion" — never as a rejection. A checkout
 without the model still boots and still accepts uploads.
 
 `weights/` sits under `app/` deliberately. The runtime stage of the Dockerfile
-copies exactly three things:
+copies exactly two directories from the source tree:
 
 ```dockerfile
 COPY --from=builder /build/app ./app
-COPY --from=builder /build/alembic ./alembic
-COPY --from=builder /build/alembic.ini ./alembic.ini
+COPY --from=builder /build/sql ./sql
 ```
 
 A `models/` directory at the repository root would be built into the image and
@@ -107,7 +112,7 @@ a missing-file error on the first upload after deploy.
 POST /submissions/
   ├─ content-type whitelist, photo count           existing checks
   ├─ screen(): read → classify → rewind            ← here
-  │     every photo REJECT  → 422, nothing stored
+  │     any photo REJECT    → 422, nothing stored
   │     otherwise           → carry on
   ├─ upload each photo to submission-images
   └─ insert the row, with ai_is_plant / ai_top_matches
@@ -128,9 +133,12 @@ The verdict lands in columns that already existed:
 | `ai_is_plant`    | boolean | `NULL` when screening did not run — distinct from `false` |
 | `ai_top_matches` | jsonb   | `{"screening": {"plant_probability": …, "photos": […]}}` |
 
-**A submission is refused only when every photo is a confident negative.** One
-stray frame among several is far more likely to be an honest mistake than
-abuse, and the model is not accurate enough to be given that authority.
+**A submission is refused when any photo is a confident negative.** Every
+photo in a submission must show the plant, and each one is judged exactly as
+it would be on its own. Refusing only an all-negative set let a single plant
+photo carry any number of non-plant ones through. The uncertain band is still
+accepted and marked for the reviewer, for the reason above: it is where the
+specimen shots and bark close-ups land.
 
 ## Still outstanding before this can be switched on
 

@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.plant import TOXICITY_SPECIES, UNKNOWN, Plant, not_recorded
-from app.services.submission_service import _unknown_defaults
+from app.models.plant import TOXICITY_SPECIES, UNKNOWN, Plant, not_recorded, unknown_defaults
 
 # ── 1. 'Unknown' means absent ────────────────────────────────────────────────
 
@@ -141,7 +140,7 @@ def test_defaults_cover_every_not_null_column() -> None:
     `created_at`, which carries a `server_default` of `now()`. Those are the
     only NOT NULL columns a writer legitimately omits.
     """
-    supplied = set(_unknown_defaults()) | {"botanical_name"}
+    supplied = set(unknown_defaults()) | {"botanical_name"}
     required = {
         column.name
         for column in Plant.__table__.columns
@@ -156,18 +155,18 @@ def test_defaults_cover_every_not_null_column() -> None:
 
 def test_botanical_name_is_deliberately_not_defaulted() -> None:
     """Defaulting it would publish an unnamed plant rather than fail."""
-    assert "botanical_name" not in _unknown_defaults()
+    assert "botanical_name" not in unknown_defaults()
 
 
 def test_the_defaults_read_as_not_recorded() -> None:
     """Otherwise the reviewer warnings would not fire on an empty approval."""
-    for name, value in _unknown_defaults().items():
+    for name, value in unknown_defaults().items():
         assert not_recorded(value) is True, name
 
 
 def test_each_call_returns_fresh_structures() -> None:
     """A module-level constant would be shared between every approved plant."""
-    first, second = _unknown_defaults(), _unknown_defaults()
+    first, second = unknown_defaults(), unknown_defaults()
     first["toxicity_by_species"]["humans"] = "Toxic"
     first["toxic_parts"].append("Seeds")
     assert second["toxicity_by_species"]["humans"] == UNKNOWN
@@ -175,4 +174,4 @@ def test_each_call_returns_fresh_structures() -> None:
 
 
 def test_the_species_default_covers_every_species_plus_notes() -> None:
-    assert set(_unknown_defaults()["toxicity_by_species"]) == {*TOXICITY_SPECIES, "notes"}
+    assert set(unknown_defaults()["toxicity_by_species"]) == {*TOXICITY_SPECIES, "notes"}

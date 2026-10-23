@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, badges, plants, submissions, users
+from app.api.v1 import admin, auth, badges, plants, submissions, users
 
 api_router = APIRouter()
 
@@ -11,3 +11,4 @@ api_router.include_router(plants.router, prefix="/plants", tags=["plants"])
 api_router.include_router(submissions.router, prefix="/submissions", tags=["submissions"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(badges.router, prefix="/badges", tags=["badges"])
+api_router.include_router(admin.router, prefix="/admin", tags=["admin"])

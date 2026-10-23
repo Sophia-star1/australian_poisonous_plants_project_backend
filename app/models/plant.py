@@ -67,6 +67,45 @@ TOXICITY_SPECIES: tuple[str, ...] = (
 TOXIC = "Toxic"
 
 
+def unknown_defaults() -> dict[str, Any]:
+    """Every NOT NULL `plants_v2` column, set to the dataset's "no value".
+
+    `plants_v2` has no nullable columns and records a gap as the string
+    `'Unknown'` — as `['Unknown']` for a text array, and as an object of
+    `'Unknown'` for the two jsonb columns. `botanical_name` is absent on
+    purpose: a reviewer must supply it, and defaulting it to `'Unknown'` would
+    publish an unnamed plant rather than fail.
+
+    Built fresh on each call because the nested structures are mutable; a
+    module-level constant would be shared between every approved plant.
+    """
+    return {
+        "family_name": UNKNOWN,
+        "common_names": [UNKNOWN],
+        "origin_status": UNKNOWN,
+        "distribution": [UNKNOWN],
+        "habitat": UNKNOWN,
+        "seasonality_of_toxicity": UNKNOWN,
+        "toxic_parts": [UNKNOWN],
+        "lethality": UNKNOWN,
+        "health_effects": UNKNOWN,
+        "toxicity_by_species": {key: UNKNOWN for key in (*TOXICITY_SPECIES, "notes")},
+        "toxin_profile": {
+            "primary_class": UNKNOWN,
+            "secondary_class": UNKNOWN,
+            "toxins_implicated": UNKNOWN,
+        },
+        "morphological_attributes": {
+            "height_m": UNKNOWN,
+            "growth_form": UNKNOWN,
+            "woodiness": UNKNOWN,
+            "life_history": UNKNOWN,
+            "fruit_colour": UNKNOWN,
+            "flowering_time": [UNKNOWN],
+        },
+    }
+
+
 def not_recorded(value: object) -> bool:
     """Whether a `plants_v2` value means "nothing was recorded here".
 

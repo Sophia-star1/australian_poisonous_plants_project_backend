@@ -1,5 +1,7 @@
 """Application configuration via pydantic-settings."""
 
+from typing import Literal
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,12 +14,16 @@ class Settings(BaseSettings):
     @field_validator(
         "DATABASE_URL",
         "REDIS_URL",
-        "CELERY_BROKER_URL",
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_S3_ENDPOINT_URL",
+        "AWS_S3_BUCKET",
+        "AWS_REGION",
+        "S3_PUBLIC_BASE_URL",
+        "SMTP_HOST",
+        "SMTP_USERNAME",
         mode="after",
     )
     @classmethod
@@ -42,6 +48,17 @@ class Settings(BaseSettings):
         """
         return value.strip()
 
+    @field_validator("SMTP_PASSWORD", mode="after")
+    @classmethod
+    def _strip_trailing_newline(cls, value: str) -> str:
+        """Drop the newline Secret Manager tends to keep, and nothing else.
+
+        Same failure as above — a password loaded with a trailing newline
+        fails to log in — but unlike a key or a URL, a password may begin or
+        end with a space on purpose, so only line endings are removed.
+        """
+        return value.rstrip("\r\n")
+
     # --- Core ---
     APP_NAME: str = "apl-backend"
     DEBUG: bool = False
@@ -56,11 +73,32 @@ class Settings(BaseSettings):
     # --- Redis (optional) ---
     REDIS_URL: str = ""
 
-    # --- Object Storage (optional) ---
+    # --- Object storage: Supabase Storage or any S3-compatible service ---
+    #: Which storage backend to use. "auto" picks Supabase when SUPABASE_URL and
+    #: SUPABASE_SERVICE_ROLE_KEY are set, otherwise S3 when AWS_S3_BUCKET and
+    #: S3_PUBLIC_BASE_URL are set, otherwise none (uploads are discarded, with
+    #: a warning). Set it explicitly to make a misconfiguration fail loudly.
+    STORAGE_BACKEND: Literal["auto", "supabase", "s3"] = "auto"
+
+    # S3-compatible storage (AWS S3, Cloudflare R2, RustFS, ...). One bucket
+    # holds everything; the three logical buckets below become key prefixes in
+    # it, e.g. `avatars/users/7/<random>.jpg`.
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
+    #: The one physical bucket. Must already exist.
     AWS_S3_BUCKET: str = ""
+    #: Only for non-AWS services, e.g. https://<account>.r2.cloudflarestorage.com
+    #: or http://storage:9000. Empty means AWS itself.
     AWS_S3_ENDPOINT_URL: str = ""
+    #: e.g. ap-southeast-2. R2 uses "auto".
+    AWS_REGION: str = ""
+    #: Public base URL where the bucket's objects can be read, without a trailing
+    #: slash: `<S3_PUBLIC_BASE_URL>/<key>` must serve the object at `<key>`.
+    #: e.g. https://<bucket>.s3.<region>.amazonaws.com, an R2 public domain, a
+    #: CDN in front of the bucket, or http://<host>:9000/<bucket>. The bucket
+    #: (or the CDN) must allow anonymous reads; the app writes the URLs it
+    #: stores from this.
+    S3_PUBLIC_BASE_URL: str = ""
 
     # --- Supabase Storage ---
     #: Project URL, e.g. https://<ref>.supabase.co
@@ -75,6 +113,9 @@ class Settings(BaseSettings):
     #: point at that bucket, and promoted photos belong next to the library
     #: they are joined to, not in the v1 bucket the app no longer reads.
     SUPABASE_PLANT_BUCKET: str = "plant-images-v2"
+    #: Profile pictures. Public, like the plant bucket: an avatar is shown to
+    #: whoever sees the account, and each upload gets a new random key.
+    SUPABASE_AVATAR_BUCKET: str = "avatars"
     #: Rejected uploads, per policy: keep the originals as an audit trail.
     MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     ALLOWED_IMAGE_TYPES: list[str] = ["image/jpeg", "image/png", "image/webp"]
@@ -83,13 +124,15 @@ class Settings(BaseSettings):
     #: Off switch. The classifier also stays out of the way on its own when
     #: the weights are missing, so a checkout without them still boots.
     PLANT_CLASSIFIER_ENABLED: bool = True
-    #: Below this the upload is refused. Deliberately far under the model's
-    #: own 0.7 cutoff: measured against this project's curated library — 104
-    #: photographs, all genuinely plants — 0.7 turns away 7 of them, while
-    #: 0.10 turns away 1. The rejected ones are specimen shots, bark close-ups
-    #: and non-green plant parts, which is the sort of photograph this
-    #: database exists to collect.
-    PLANT_REJECT_BELOW: float = 0.10
+    #: Below this the upload is refused. Raised from 0.10 because ordinary
+    #: non-plants landed above that floor and were accepted: screenshots
+    #: score 0.24–0.49, a blank frame about 0.32. The cost is honest photos:
+    #: against this project's curated library — 104 photographs, all
+    #: genuinely plants — 0.5 turns away 6 of them (0.10 turned away 1, the
+    #: model's own 0.7 cutoff 7). Those are specimen shots, bark close-ups and
+    #: non-green plant parts, and since every photo in a submission must pass,
+    #: the chance of refusing an honest submission grows with its photo count.
+    PLANT_REJECT_BELOW: float = 0.50
     #: At or above this the photo counts as a plant. Anything in between is
     #: accepted but marked for the reviewer rather than refused.
     PLANT_ACCEPT_AT: float = 0.70
@@ -132,9 +175,21 @@ class Settings(BaseSettings):
         return value
 
     # --- Email (optional) ---
-    #: Resend API key. Without it the service still runs and logs what it
-    #: would have sent, so a checkout with no credentials behaves like
-    #: production minus the delivery.
+    #: SMTP submission server, e.g. the domain's own mailbox provider. When
+    #: set, mail goes out through it and Resend is not used. Without either,
+    #: the service still runs and logs what it would have sent, so a checkout
+    #: with no credentials behaves like production minus the delivery.
+    SMTP_HOST: str = ""
+    #: 587 with STARTTLS, or 465 for implicit TLS. Cloud Run blocks outbound
+    #: port 25, not the submission ports.
+    SMTP_PORT: int = 587
+    #: The mailbox to log in as. Use the same address as EMAIL_FROM: mailbox
+    #: providers refuse, or mark as spoofed, mail sent "from" someone else.
+    SMTP_USERNAME: str = ""
+    #: The mailbox password. Secret Manager only; never an env var in
+    #: cloudbuild.yaml or a committed file.
+    SMTP_PASSWORD: str = ""
+    #: Resend API key, used when SMTP_HOST is not set.
     RESEND_API_KEY: str = ""
     #: Sender address. `onboarding@resend.dev` is Resend's shared test sender:
     #: no domain verification needed, but it only delivers to the address that
@@ -145,15 +200,33 @@ class Settings(BaseSettings):
     EMAIL_REPLY_TO: str = ""
 
     @property
+    def email_transport(self) -> str:
+        """`smtp` when SMTP_HOST is set, otherwise `resend`.
+
+        Decided by SMTP_HOST alone, so a half-configured SMTP setup reports
+        itself as disabled rather than quietly falling back to Resend with a
+        sender Resend has never verified.
+        """
+        return "smtp" if self.SMTP_HOST else "resend"
+
+    @property
     def email_enabled(self) -> bool:
         """Whether outgoing mail can actually be delivered."""
-        return bool(self.RESEND_API_KEY and self.EMAIL_FROM)
+        if not self.EMAIL_FROM:
+            return False
+        if self.email_transport == "smtp":
+            return bool(self.SMTP_USERNAME and self.SMTP_PASSWORD)
+        return bool(self.RESEND_API_KEY)
 
     # --- CORS ---
     ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:8081",
         "http://localhost:19006",
+        "http://aupoisonousplants.world",
+        "https://aupoisonousplants.world",
+        "http://www.aupoisonousplants.world",
+        "https://www.aupoisonousplants.world",
     ]
 
     # --- Rate limiting (credential endpoints) ---
@@ -161,11 +234,14 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT: int = 10
     SIGNUP_RATE_LIMIT: int = 5
     RATE_LIMIT_WINDOW_SECONDS: int = 300
+    #: Photo uploads — new submissions and photos added to one — per client IP,
+    #: and per account when signed in, in each window. Submitting needs no
+    #: account and one request may carry ten 10 MB photos, so without a limit
+    #: a single client could fill the storage (and its bill) unchecked.
+    SUBMISSION_RATE_LIMIT: int = 20
+    SUBMISSION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
     #: Escape hatch for load tests and local scripting. Never enable in prod.
     RATE_LIMIT_ENABLED: bool = True
-
-    # --- Celery (optional) ---
-    CELERY_BROKER_URL: str = ""
 
     @property
     def redis_enabled(self) -> bool:
@@ -173,9 +249,9 @@ class Settings(BaseSettings):
         return bool(self.REDIS_URL)
 
     @property
-    def storage_enabled(self) -> bool:
-        """Check whether object storage is configured."""
-        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_S3_BUCKET)
+    def s3_storage_enabled(self) -> bool:
+        """Check whether S3-compatible storage is configured."""
+        return bool(self.AWS_S3_BUCKET and self.S3_PUBLIC_BASE_URL)
 
     @property
     def supabase_storage_enabled(self) -> bool:
@@ -183,9 +259,21 @@ class Settings(BaseSettings):
         return bool(self.SUPABASE_URL and self.SUPABASE_SERVICE_ROLE_KEY)
 
     @property
-    def celery_enabled(self) -> bool:
-        """Check whether Celery broker is configured."""
-        return bool(self.CELERY_BROKER_URL)
+    def storage_backend(self) -> Literal["supabase", "s3", "none"]:
+        """The storage backend in use, resolving STORAGE_BACKEND="auto".
+
+        An explicit choice whose settings are missing resolves to "none", so
+        the service warns and discards rather than writing somewhere else.
+        """
+        if self.STORAGE_BACKEND == "supabase":
+            return "supabase" if self.supabase_storage_enabled else "none"
+        if self.STORAGE_BACKEND == "s3":
+            return "s3" if self.s3_storage_enabled else "none"
+        if self.supabase_storage_enabled:
+            return "supabase"
+        if self.s3_storage_enabled:
+            return "s3"
+        return "none"
 
 
 settings = Settings()

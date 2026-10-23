@@ -5,7 +5,7 @@ Auth's `auth.users`. Mobile auth talks to our backend (JWT) rather than
 Supabase Auth directly once the rewire lands.
 """
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin
@@ -22,3 +22,6 @@ class User(Base, TimestampMixin):
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     role: Mapped[str] = mapped_column(String(50), default="user", nullable=False)
+    #: Public URL of the profile picture in the `avatars` bucket, or NULL for
+    #: none (the app then shows its default). Added by sql/003.
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)

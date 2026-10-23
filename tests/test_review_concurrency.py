@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.dialects import postgresql
 
 from app.db.session import get_db
 from app.dependencies import get_current_active_user
@@ -154,12 +155,20 @@ def test_the_version_is_short_enough_to_pass_around() -> None:
 def test_fields_cannot_bleed_into_each_other() -> None:
     """Concatenation without a separator would make ("ab","c") match ("a","bc")."""
     first = content_fingerprint(
-        contributor_name="ab", user_description="c", location_state=None,
-        latitude=None, longitude=None, photos=[],
+        contributor_name="ab",
+        user_description="c",
+        location_state=None,
+        latitude=None,
+        longitude=None,
+        photos=[],
     )
     second = content_fingerprint(
-        contributor_name="a", user_description="bc", location_state=None,
-        latitude=None, longitude=None, photos=[],
+        contributor_name="a",
+        user_description="bc",
+        location_state=None,
+        latitude=None,
+        longitude=None,
+        photos=[],
     )
     assert first != second
 
@@ -185,6 +194,10 @@ class FakeSession:
                 return (SUBMISSION_ID,)
 
         return _Result()
+
+    async def scalar(self, statement: Any) -> Any:
+        """The duplicate-name lookup: no plant by that name yet."""
+        return None
 
     async def flush(self) -> None:
         for obj in self.added:
@@ -253,9 +266,7 @@ def _body(version: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_current_version_is_accepted(
-    async_client: AsyncClient, reviewing: Any
-) -> None:
+async def test_a_current_version_is_accepted(async_client: AsyncClient, reviewing: Any) -> None:
     row = _submission()
     reviewing(row)
 
@@ -280,9 +291,7 @@ async def test_a_stale_version_is_refused(async_client: AsyncClient, reviewing: 
 
 
 @pytest.mark.asyncio
-async def test_a_stale_review_publishes_nothing(
-    async_client: AsyncClient, reviewing: Any
-) -> None:
+async def test_a_stale_review_publishes_nothing(async_client: AsyncClient, reviewing: Any) -> None:
     """A refusal has to happen before the plant is created, not after."""
     row = _submission()
     stale = submission_fingerprint(row)
@@ -323,9 +332,7 @@ async def test_the_version_is_returned_with_the_submission(
 
 
 @pytest.mark.asyncio
-async def test_the_version_cannot_be_omitted(
-    async_client: AsyncClient, reviewing: Any
-) -> None:
+async def test_the_version_cannot_be_omitted(async_client: AsyncClient, reviewing: Any) -> None:
     """A guard a client can forget to send is not a guard."""
     reviewing(_submission())
 
@@ -349,3 +356,41 @@ async def test_a_rejection_is_guarded_too(async_client: AsyncClient, reviewing: 
         json={"status": "rejected", "expected_version": stale},
     )
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_the_row_is_locked_before_the_version_is_checked(
+    async_client: AsyncClient, reviewing: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: an edit landing mid-review was approved unseen.
+
+    The guarded UPDATE re-checks only the status, so a contributor's edit that
+    committed between the version check and that UPDATE went through: the
+    version matched what was read, not what was then written. The row is now
+    locked first, so the edit waits for the review or the review sees it.
+    """
+    row = _submission()
+    session = reviewing(row)
+    steps: list[str] = []
+
+    original_execute = session.execute
+
+    async def _recording_execute(statement: Any) -> Any:
+        steps.append(str(statement.compile(dialect=postgresql.dialect())))
+        return await original_execute(statement)
+
+    async def _recording_get_by_id(self: Any, submission_id: UUID) -> Submission:
+        steps.append("read the submission")
+        return row
+
+    monkeypatch.setattr(session, "execute", _recording_execute)
+    monkeypatch.setattr(SubmissionService, "get_by_id", _recording_get_by_id)
+
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}", json=_body(submission_fingerprint(row))
+    )
+
+    assert response.status_code == 200, response.text
+    lock = steps[0]
+    assert "FROM submissions" in lock and lock.rstrip().endswith("FOR UPDATE")
+    assert steps[1] == "read the submission", "locked before the version is read"

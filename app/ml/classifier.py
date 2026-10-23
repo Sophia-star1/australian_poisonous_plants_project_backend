@@ -40,6 +40,7 @@ probabilities by as much as 0.06, enough to flip a borderline photo.
 from __future__ import annotations
 
 import io
+import math
 import threading
 from dataclasses import dataclass
 from enum import StrEnum
@@ -82,6 +83,18 @@ _RESIZE_RATIO = 1.15
 #: transform.
 MAX_DECODE_PIXELS = 13_000_000
 
+#: What an image over `MAX_DECODE_PIXELS` is decoded down to by libvips.
+SHRINK_TARGET_PIXELS = 2_000_000
+
+#: The most pixels an upload may declare at all, whatever the format.
+#:
+#: libvips bounds the memory a huge image costs, not the time: a PNG still
+#: has to be inflated row by row, every row of it. This keeps a few kilobytes
+#: of crafted file from buying seconds of CPU. 200 MP is the largest sensor
+#: mode phones ship (16320x12240), and a real photo that size is far beyond
+#: the 10 MB upload limit anyway.
+MAX_SOURCE_PIXELS = 200_000_000
+
 
 class Decision(StrEnum):
     """What the pipeline should do with an upload."""
@@ -120,30 +133,167 @@ class ImageTooLargeError(ValueError):
     """The image declares more pixels than can be decoded safely."""
 
 
-def _open_within_budget(data: bytes) -> Image.Image:
+# ── runtime thresholds ───────────────────────────────────────────────────────
+#
+# The grading bands are adjustable at runtime through the admin endpoints
+# (`app/api/v1/admin.py`), which write a row the screening path refreshes
+# from. The override lives here, in the process the classifier runs in, and
+# `classify` reads it on every call so a change applies without reloading
+# the model. A tuple rather than two globals, so readers see a consistent
+# pair; writes go through the lock for the same reason.
+
+_runtime_thresholds: tuple[float, float] | None = None
+_runtime_thresholds_lock = threading.Lock()
+
+
+def set_runtime_thresholds(reject_below: float, accept_at: float) -> None:
+    """Override the bands `classify` grades against, for this process.
+
+    Raised at the boundary so a bad pair never silently grades every photo
+    wrong: the validation here is the same one the database constraints and
+    the endpoint enforce.
+    """
+    if not 0.0 <= reject_below < accept_at <= 1.0:
+        raise ValueError(
+            f"Thresholds must satisfy 0 <= reject_below ({reject_below}) "
+            f"< accept_at ({accept_at}) <= 1."
+        )
+    global _runtime_thresholds
+    with _runtime_thresholds_lock:
+        _runtime_thresholds = (float(reject_below), float(accept_at))
+
+
+def clear_runtime_thresholds() -> None:
+    """Forget the override; `classify` grades by each instance's own bands again."""
+    global _runtime_thresholds
+    with _runtime_thresholds_lock:
+        _runtime_thresholds = None
+
+
+def runtime_thresholds() -> tuple[float, float] | None:
+    """The override in force, or `None` when nobody has set one."""
+    with _runtime_thresholds_lock:
+        return _runtime_thresholds
+
+
+def _vips() -> Any:
+    """pyvips, or None when it cannot be imported.
+
+    A hard dependency, so None means a broken install rather than a choice;
+    `open_within_budget` then falls back to what Pillow alone can do rather
+    than failing every upload.
+    """
+    global _vips_module, _vips_checked
+    if not _vips_checked:
+        try:
+            import pyvips  # imported here so a missing libvips cannot break import
+
+            # No operation cache: it would keep the source bytes and the
+            # decoded result of every upload alive after the request.
+            pyvips.cache_set_max(0)
+            _vips_module = pyvips
+        except Exception as exc:  # noqa: BLE001 - OSError from a missing libvips, too
+            logger.warning(
+                "libvips_unavailable",
+                error=f"{type(exc).__name__}: {exc}",
+                detail="Images over the decode budget are refused unless they are JPEG.",
+            )
+        _vips_checked = True
+    return _vips_module
+
+
+_vips_module: Any = None
+_vips_checked = False
+
+
+def _too_large(width: int, height: int, limit: int) -> ImageTooLargeError:
+    return ImageTooLargeError(
+        f"{width}x{height} is {width * height / 1e6:.0f} megapixels; "
+        f"the limit is {limit / 1e6:.0f}."
+    )
+
+
+def _shrink_with_vips(vips: Any, data: bytes, width: int, height: int) -> Image.Image:
+    """Decode `data` straight to about `SHRINK_TARGET_PIXELS`, as a Pillow image.
+
+    `thumbnail_buffer` never holds the full image: JPEG and WebP are decoded
+    at a reduced scale by their own libraries, and PNG is decoded row by row
+    with each row folded into the smaller result as it arrives. Memory follows
+    the output size, not the declared one.
+
+    EXIF orientation is applied here, so the image comes back upright and
+    without the tag; a caller's `exif_transpose` then has nothing to do.
+    Colour is normalised to 8-bit sRGB (16-bit PNG, greyscale and CMYK
+    included), keeping an alpha band when there is one, which is what the
+    Pillow path hands its callers too.
+    """
+    side = math.ceil(max(width, height) * math.sqrt(SHRINK_TARGET_PIXELS / (width * height)))
+    try:
+        # A square box, so the fit is the same whichever way autorotation
+        # turns the image. `fail_on=truncated` refuses a cut-off file, as
+        # Pillow does, instead of padding it with grey.
+        shrunk = vips.Image.thumbnail_buffer(
+            data, side, height=side, size="down", option_string="fail_on=truncated"
+        )
+        if shrunk.interpretation != "srgb":
+            shrunk = shrunk.colourspace("srgb")
+        if shrunk.format != "uchar":
+            shrunk = shrunk.cast("uchar")
+        pixels = np.ndarray(
+            buffer=shrunk.write_to_memory(),
+            dtype=np.uint8,
+            shape=(shrunk.height, shrunk.width, shrunk.bands),
+        )
+    except vips.Error as exc:
+        raise UndecodableImageError("The file could not be read as an image.") from exc
+    return Image.fromarray(pixels[:, :, 0] if shrunk.bands == 1 else pixels)
+
+
+def open_within_budget(data: bytes) -> Image.Image:
     """Open `data` so that decoding it cannot exceed `MAX_DECODE_PIXELS`.
 
     `Image.open` reads only the header, so the declared size is known before a
-    single pixel is decoded. A JPEG over budget is decoded at a reduced scale
-    instead — libjpeg can produce 1/2, 1/4 or 1/8 directly from the DCT
-    coefficients, without ever holding the full image. The model sees 224 px
-    in the end, so nothing it could use is lost; the tensor is no longer
-    bit-identical to the training transform, which is acceptable for photos
-    that would otherwise not be screenable at all. Other formats have no such
-    path and are refused.
+    single pixel is decoded.
 
-    Pillow's own guard is a backstop, not the limit: it only raises above
-    ~179 MP and merely warns from ~89 MP.
+    * Within budget: returned as Pillow opened it, untouched. This is the path
+      ordinary photos take, and for it the screening tensor stays
+      bit-identical to the training transform.
+    * Over budget, up to `MAX_SOURCE_PIXELS`: decoded by libvips directly to
+      about `SHRINK_TARGET_PIXELS`, whatever the format (see
+      `_shrink_with_vips`). The model sees 224 px in the end and an avatar
+      512, so nothing either could use is lost.
+    * Beyond `MAX_SOURCE_PIXELS`: refused without decoding.
+
+    Pillow's own guard is a backstop, not the limit: it raises from ~179 MP,
+    and then the declared size is read with libvips instead.
+
+    Raises:
+        ImageTooLargeError: beyond `MAX_SOURCE_PIXELS`, or over budget with
+            no way to shrink it.
+        UndecodableImageError: libvips could not decode an over-budget image.
     """
+    vips = _vips()
     try:
-        opened = Image.open(io.BytesIO(data))
+        opened: Image.Image | None = Image.open(io.BytesIO(data))
+        width, height = opened.size  # type: ignore[union-attr]
     except Image.DecompressionBombError as exc:
-        raise ImageTooLargeError(str(exc)) from exc
+        if vips is None:
+            raise ImageTooLargeError(str(exc)) from exc
+        try:
+            header = vips.Image.new_from_buffer(data, "", access="sequential")
+        except vips.Error as vips_exc:
+            raise UndecodableImageError("The file could not be read as an image.") from vips_exc
+        opened, width, height = None, header.width, header.height
 
-    width, height = opened.size
-    if width * height <= MAX_DECODE_PIXELS:
+    if width * height > MAX_SOURCE_PIXELS:
+        raise _too_large(width, height, MAX_SOURCE_PIXELS)
+    if opened is not None and width * height <= MAX_DECODE_PIXELS:
         return opened
+    if vips is not None:
+        return _shrink_with_vips(vips, data, width, height)
 
+    # Without libvips: what Pillow can do alone, which is only JPEG.
+    assert opened is not None
     if opened.format == "JPEG":
         scale = 2
         while scale < 8 and -(-width // scale) * -(-height // scale) > MAX_DECODE_PIXELS:
@@ -172,7 +322,7 @@ def preprocess(data: bytes, size: int) -> np.ndarray:
         ImageTooLargeError: the pixel dimensions are beyond the decode budget.
     """
     try:
-        opened = _open_within_budget(data)
+        opened = open_within_budget(data)
         image: Image.Image = (ImageOps.exif_transpose(opened) or opened).convert("RGB")
     except ImageTooLargeError:
         raise
@@ -224,9 +374,7 @@ class PlantClassifier:
 
         meta = yaml.safe_load(meta_path.read_text()) if meta_path.exists() else {}
         self.size = int(meta.get("img_size", 224))
-        self.reject_below = (
-            settings.PLANT_REJECT_BELOW if reject_below is None else reject_below
-        )
+        self.reject_below = settings.PLANT_REJECT_BELOW if reject_below is None else reject_below
         self.accept_at = settings.PLANT_ACCEPT_AT if accept_at is None else accept_at
         if not 0.0 <= self.reject_below <= self.accept_at <= 1.0:
             raise ValueError(
@@ -262,11 +410,22 @@ class PlantClassifier:
         return float(1.0 / (1.0 + np.exp(-float(np.asarray(logit).reshape(-1)[0]))))
 
     def classify(self, data: bytes) -> Verdict:
-        """Score one photo and grade it."""
+        """Score one photo and grade it.
+
+        Grades against the admin-set runtime override when one is in force
+        (`runtime_thresholds`), and against this instance's own bands
+        otherwise — which keeps a directly-constructed classifier, such as the
+        ones the tests build, grading exactly by the values it was given.
+        """
+        override = runtime_thresholds()
+        if override is not None:
+            reject_below, accept_at = override
+        else:
+            reject_below, accept_at = self.reject_below, self.accept_at
         p = self.probability(data)
-        if p < self.reject_below:
+        if p < reject_below:
             decision = Decision.REJECT
-        elif p < self.accept_at:
+        elif p < accept_at:
             decision = Decision.FLAG
         else:
             decision = Decision.ACCEPT

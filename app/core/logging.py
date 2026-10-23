@@ -66,3 +66,16 @@ def setup_logging() -> None:
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     """Return a configured structlog logger instance."""
     return structlog.get_logger(name)  # type: ignore[no-any-return]
+
+
+def mask_email(address: str) -> str:
+    """`a***@example.org`: enough to tell messages apart in a log, not to contact anyone.
+
+    Logs are kept by the hosting platform and read by whoever operates it, so
+    a full address there is personal data held for no purpose. The domain is
+    kept because it is what diagnoses delivery problems.
+    """
+    local, at, domain = address.strip().partition("@")
+    if not at:
+        return "***"
+    return f"{local[:1]}***@{domain}"

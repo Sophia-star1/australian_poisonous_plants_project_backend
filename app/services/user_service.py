@@ -25,9 +25,7 @@ class UserService:
 
     async def get_by_email(self, email: str) -> User | None:
         """Fetch a user by email address (case-insensitive)."""
-        result = await self.db.execute(
-            select(User).where(User.email == email.lower())
-        )
+        result = await self.db.execute(select(User).where(User.email == email.lower()))
         return result.scalars().first()
 
     async def list_users(
@@ -46,13 +44,7 @@ class UserService:
         total_stmt = select(func.count()).select_from(User).where(*filters)
         total = int((await self.db.execute(total_stmt)).scalar_one())
 
-        stmt = (
-            select(User)
-            .where(*filters)
-            .order_by(User.id.asc())
-            .offset(offset)
-            .limit(page_size)
-        )
+        stmt = select(User).where(*filters).order_by(User.id.asc()).offset(offset).limit(page_size)
         result = await self.db.execute(stmt)
         return result.scalars().all(), total
 
@@ -62,6 +54,16 @@ class UserService:
         if user is None:
             return None
         user.role = role.value
+        await self.db.flush()
+        await self.db.refresh(user)
+        return user
+
+    async def set_full_name(self, user_id: int, full_name: str) -> User | None:
+        """Change a user's display name. Returns None when the user does not exist."""
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return None
+        user.full_name = full_name
         await self.db.flush()
         await self.db.refresh(user)
         return user

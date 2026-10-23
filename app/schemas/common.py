@@ -15,7 +15,7 @@ class ApiResponse(BaseModel, Generic[T]):
     data: T | None = None
 
     @staticmethod
-    def success(data: T | None = None, message: str = "success") -> "ApiResponse[T]":  # type: ignore[type-var]
+    def success(data: T | None = None, message: str = "success") -> "ApiResponse[T]":
         """Create a successful response."""
         return ApiResponse(code=200, message=message, data=data)
 

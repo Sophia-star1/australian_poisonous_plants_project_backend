@@ -21,7 +21,7 @@ letting it change afterwards would leave an approved record nobody approved.
 
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, Request, UploadFile
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,7 @@ from app.core.exceptions import (
     NotFoundError,
     UnprocessableError,
 )
+from app.core.rate_limit import client_ip, enforce_rate_limit
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
 from app.ml.classifier import ImageTooLargeError, UndecodableImageError
@@ -52,11 +53,13 @@ from app.schemas.submission import (
     SubmissionUpdate,
 )
 from app.services.notification_service import ReviewOutcome, notify_review
+from app.services.plant_service import DuplicatePlantError
 from app.services.storage_service import StorageError
 from app.services.submission_service import (
     AlreadyReviewedError,
     ContentChangedError,
     NotAPlantError,
+    PlantNotFoundError,
     SubmissionService,
 )
 
@@ -97,9 +100,7 @@ def _validate_photos(photos: list[UploadFile]) -> None:
     """Reject anything that is not a plausible plant photo.
 
     Checked before a single byte is uploaded, so a bad request costs nothing
-    in storage. The declared content type is not trustworthy on its own — it
-    is client-supplied — but rejecting on it stops the honest mistakes, and
-    the storage key never carries an executable extension either way.
+    in storage.
     """
     if not photos:
         raise UnprocessableError("At least one photo is required.")
@@ -107,6 +108,18 @@ def _validate_photos(photos: list[UploadFile]) -> None:
         raise UnprocessableError(
             f"A submission may include at most {MAX_PHOTOS_PER_SUBMISSION} photos."
         )
+    _validate_photo_types(photos)
+
+
+def _validate_photo_types(photos: list[UploadFile]) -> None:
+    """Reject any file whose declared type is not an allowed image type.
+
+    Shared by creating a submission and adding photos to one: without it on
+    the add path, anything could be attached to a pending submission once it
+    existed. The declared content type is not trustworthy on its own — it is
+    client-supplied — but rejecting on it stops the honest mistakes, and the
+    storage key never carries an executable extension either way.
+    """
     for photo in photos:
         content_type = (photo.content_type or "").split(";")[0].strip().lower()
         if content_type not in settings.ALLOWED_IMAGE_TYPES:
@@ -134,14 +147,44 @@ async def _commit_uploads(db: AsyncSession, service: SubmissionService) -> None:
         raise
 
 
+#: What screening raises for a photo it will not let through.
+_SCREENING_REFUSALS = (NotAPlantError, ImageTooLargeError, UndecodableImageError)
+
+
+def _refused_by_screening(
+    exc: NotAPlantError | ImageTooLargeError | UndecodableImageError,
+) -> UnprocessableError:
+    """The 422 for a photo screening refused.
+
+    Shared by creating a submission and adding photos to one, so the same
+    photo is refused in the same words on either path.
+    """
+    if isinstance(exc, ImageTooLargeError):
+        # The header declares more pixels than screening can decode safely.
+        # A 17 KB file can claim 144 megapixels; decoding it is the attack.
+        return UnprocessableError(
+            f"One of the photos is too large to process ({exc}). Export it at a "
+            "smaller size, or as a JPEG, and try again."
+        )
+    if isinstance(exc, UndecodableImageError):
+        # The declared content type said image; the bytes disagree. Caught
+        # here only because screening is the first thing that tries to decode
+        # them — worth refusing either way, since a reviewer cannot look at it.
+        return UnprocessableError(
+            "One of the files is not a readable image. Re-export it and try again."
+        )
+    # Screening is confident at least one photo does not show a plant. Said
+    # plainly, naming the photo, so the contributor can fix it and retry
+    # rather than face a generic rejection they cannot act on.
+    return UnprocessableError(str(exc))
+
+
 def _is_owner(submission: Submission, user: User) -> bool:
     """Ownership is by contributor email — the schema has no user FK."""
     return submission.contributor_email.lower() == user.email.lower()
 
 
-async def _load_for_user(
-    service: SubmissionService, submission_id: UUID, user: User
-) -> Submission:
+async def _load_for_user(service: SubmissionService, submission_id: UUID, user: User) -> Submission:
     """Fetch a submission the caller is allowed to see.
 
     A stranger gets 404 rather than 403: answering 'forbidden' would confirm
@@ -167,8 +210,23 @@ def _require_editable(submission: Submission, user: User) -> None:
         )
 
 
+async def _limit_uploads(request: Request, user: User | None) -> None:
+    """Count one upload request against the caller's IP, and account if signed in."""
+    identifiers = [f"ip:{client_ip(request)}"]
+    if user is not None:
+        identifiers.append(f"user:{user.id}")
+    await enforce_rate_limit(
+        "upload",
+        identifiers,
+        settings.SUBMISSION_RATE_LIMIT,
+        settings.SUBMISSION_RATE_LIMIT_WINDOW_SECONDS,
+        message="Too many uploads. Please wait before submitting again.",
+    )
+
+
 @router.post("/", response_model=ApiResponse[SubmissionOut], status_code=201)
 async def create_submission(
+    request: Request,
     photos: list[UploadFile] = File(..., description="Plant photos (jpg/png/webp, at least one)."),
     user_description: str = Form(""),
     contributor_name: str = Form(...),
@@ -190,11 +248,13 @@ async def create_submission(
     `contributor_email` in the form are ignored, and the submission then
     appears in `GET /submissions/me` and can be edited while it is pending.
 
-    Every photograph is screened for whether it shows a plant. A submission
-    where none of them do is refused with an explanation; an uncertain one is
-    accepted and marked for the reviewer. The verdict is returned in
+    Every photograph is screened for whether it shows a plant, and every one
+    of them must: if any photo clearly does not, the whole submission is
+    refused with a message naming that photo by position. An uncertain photo
+    is accepted and marked for the reviewer. The verdict is returned in
     `ai_is_plant` and `ai_top_matches`, and is `null` when screening was
-    unavailable.
+    unavailable. `ai_is_plant` is true only when every photo is a confident
+    plant, and `plant_probability` is that of the weakest photo.
 
     Photographs are kept as the record of what was submitted, and copied into
     the plant library only if a reviewer approves.
@@ -202,9 +262,12 @@ async def create_submission(
     Errors:
 
     * `422` — unsupported file type, more than ten photographs, a file that is
-      not a readable image, one that exceeds the size limit, or nothing among
-      them that appears to be a plant.
+      not a readable image, one that exceeds the size limit, or a photo that
+      does not appear to be a plant.
+    * `429` — too many uploads from this address or account; see
+      `SUBMISSION_RATE_LIMIT`. `Retry-After` says when to try again.
     """
+    await _limit_uploads(request, current_user)
     _validate_photos(photos)
 
     if current_user is not None:
@@ -232,25 +295,8 @@ async def create_submission(
     service = SubmissionService(db)
     try:
         row = await service.create(payload=payload, photos=photos)
-    except NotAPlantError as exc:
-        # Screening is confident none of the photos show a plant. Said plainly
-        # so the contributor can fix it and retry, rather than as a generic
-        # rejection they cannot act on.
-        raise UnprocessableError(str(exc)) from exc
-    except ImageTooLargeError as exc:
-        # The header declares more pixels than screening can decode safely.
-        # A 17 KB file can claim 144 megapixels; decoding it is the attack.
-        raise UnprocessableError(
-            f"One of the photos is too large to process ({exc}). Export it at a "
-            "smaller size, or as a JPEG, and try again."
-        ) from exc
-    except UndecodableImageError as exc:
-        # The declared content type said image; the bytes disagree. Caught
-        # here only because screening is the first thing that tries to decode
-        # them — worth refusing either way, since a reviewer cannot look at it.
-        raise UnprocessableError(
-            "One of the files is not a readable image. Re-export it and try again."
-        ) from exc
+    except _SCREENING_REFUSALS as exc:
+        raise _refused_by_screening(exc) from exc
     except StorageError as exc:
         # Surface the storage failure instead of writing a submission whose
         # photos do not exist. The session rolls back with the request, and
@@ -357,6 +403,7 @@ async def update_submission_content(
     status_code=201,
 )
 async def add_submission_photos(
+    request: Request,
     submission_id: UUID,
     photos: list[UploadFile] = File(..., description="Additional photos to attach."),
     db: AsyncSession = Depends(get_db),
@@ -365,20 +412,29 @@ async def add_submission_photos(
     """Attach more photographs to your own pending submission.
 
     Same rules as the original upload: JPEG, PNG or WebP, and ten photographs
-    per submission in total. Returns the whole submission, including a new
-    `content_version` — any review in progress against the old one will now be
-    refused, which is the point.
+    per submission in total. Every new photo is screened like the original
+    ones, and if any of them clearly does not show a plant none is added; the
+    message names it by its position among the photos in this request.
+    Returns the whole submission, including a new `content_version` — any
+    review in progress against the old one will now be refused, which is the
+    point.
 
     Errors:
 
     * `403` — an administrator adding to somebody else's submission.
     * `404` — no such submission, or it is not yours.
     * `409` — already approved or rejected.
-    * `422` — unsupported type, a file over the size limit, or the total would
-      exceed ten.
+    * `422` — unsupported type, a file over the size limit, a file that is not
+      a readable image, a photo that does not appear to be a plant, or the
+      total would exceed ten.
+    * `429` — too many uploads; shares the budget of `POST /submissions/`.
     """
+    await _limit_uploads(request, current_user)
     if not photos:
         raise UnprocessableError("At least one photo is required.")
+    # Per file only: the limit here is on the combined total, checked below
+    # once the existing photos have been counted.
+    _validate_photo_types(photos)
 
     service = SubmissionService(db)
     submission = await _load_for_user(service, submission_id, current_user)
@@ -393,6 +449,8 @@ async def add_submission_photos(
 
     try:
         updated = await service.add_photos(submission_id, photos)
+    except _SCREENING_REFUSALS as exc:
+        raise _refused_by_screening(exc) from exc
     except StorageError as exc:
         # An oversized or empty file, or storage being unavailable. Caught on
         # upload but not here, so the same mistake was a 422 when creating a
@@ -407,9 +465,7 @@ async def add_submission_photos(
     return ApiResponse.success(data=out)
 
 
-@router.delete(
-    "/{submission_id}/photos/{photo_id}", response_model=ApiResponse[SubmissionOut]
-)
+@router.delete("/{submission_id}/photos/{photo_id}", response_model=ApiResponse[SubmissionOut])
 async def delete_submission_photo(
     submission_id: UUID,
     photo_id: UUID,
@@ -438,8 +494,7 @@ async def delete_submission_photo(
 
     if await service.count_photos(submission_id) <= 1:
         raise UnprocessableError(
-            "A submission must keep at least one photo. Add a replacement before "
-            "removing this one."
+            "A submission must keep at least one photo. Add a replacement before removing this one."
         )
 
     updated = await service.delete_photo(submission_id, photo_id)
@@ -453,7 +508,9 @@ async def delete_submission_photo(
 
 @router.get("/", response_model=ApiResponse[PageResult[SubmissionOut]])
 async def list_all_submissions(
-    status: SubmissionStatus | None = Query(None, description="Filter: pending, approved, or rejected."),
+    status: SubmissionStatus | None = Query(
+        None, description="Filter: pending, approved, or rejected."
+    ),
     contributor_name: str | None = Query(None, description="Case-insensitive substring match."),
     contributor_email: str | None = Query(None, description="Case-insensitive substring match."),
     page: int = Query(1, ge=1),
@@ -511,20 +568,33 @@ async def update_submission_status(
     photographs have changed since you loaded it the review is refused rather
     than applied — reload, see what changed, and decide again.
 
-    **Approving** requires `plant` with at least `botanical_name`. Everything
-    else about the plant is optional: the response returns `warnings` listing
-    what the published entry does not say, rather than blocking on it. Fields
-    you omit are left unset rather than blanked.
+    **Approving** needs exactly one of:
 
-    **Rejecting** must not carry `plant`. `reviewer_notes` is passed on to the
-    contributor in the email, so it is the most useful thing to fill in.
+    * `plant`, with at least `botanical_name`, for a species not yet in the
+      library: it is published as a new entry. Everything else about the plant
+      is optional: the response returns `warnings` listing what the published
+      entry does not say, rather than blocking on it. Fields you omit are left
+      unset rather than blanked. If a plant with that botanical name already
+      exists (ignoring case and spacing) this is a `409` naming its id; approve
+      into it with `plant_id` instead.
+    * `plant_id`, for another observation of a plant already in the library:
+      the photos join its gallery, beside its existing cover, and nothing else
+      about it changes. To correct the entry itself use `PATCH /plants/{id}`.
+
+    Either way the promoted photos are captioned with the plant's botanical
+    name; the contributor's description is not published.
+
+    **Rejecting** must carry neither `plant` nor `plant_id`. `reviewer_notes`
+    (up to 2000 characters) is passed on to the contributor in the email, so it
+    is the most useful thing to fill in.
 
     Errors:
 
-    * `409` — the submission was edited after you loaded it, or another
-      reviewer decided first.
-    * `422` — approving without an identification, rejecting with one, or a
-      photograph that could not be copied into the library.
+    * `409` — the submission was edited after you loaded it, another reviewer
+      decided first, or `plant` names a species already in the library.
+    * `422` — approving with neither `plant` nor `plant_id` (or with both),
+      rejecting with either, a `plant_id` that does not exist, notes over 2000
+      characters, or a photograph that could not be copied into the library.
     """
     svc = SubmissionService(db)
     try:
@@ -537,6 +607,12 @@ async def update_submission_status(
         raise ConflictError(str(exc)) from exc
     except AlreadyReviewedError as exc:
         raise ConflictError(str(exc)) from exc
+    except DuplicatePlantError as exc:
+        # 409, like the other two: the request is well formed, it would just
+        # publish a second entry for a plant the library already has.
+        raise ConflictError(str(exc)) from exc
+    except PlantNotFoundError as exc:
+        raise UnprocessableError(str(exc)) from exc
     except StorageError as exc:
         raise UnprocessableError(
             f"Could not copy the photos into the plant library: {exc}"

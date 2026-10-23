@@ -9,7 +9,6 @@ __pycache__/
 .env.local
 *.md
 tests/
-k8s/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

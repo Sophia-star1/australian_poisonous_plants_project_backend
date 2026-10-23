@@ -12,21 +12,25 @@ from uuid import UUID, uuid4
 import pytest
 from httpx import AsyncClient
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import MissingGreenlet
 
 from app.api.v1 import submissions as api
 from app.db.session import get_db
 from app.dependencies import get_current_active_user
 from app.main import app
-from app.models.plant import Plant, PlantImage
+from app.models.plant import Plant, PlantImage, unknown_defaults
 from app.models.submission import Submission, SubmissionImage
 from app.models.user import User
-from app.schemas.submission import PlantIdentification, SubmissionUpdate
+from app.schemas.submission import (
+    REVIEWER_NOTES_MAX_LENGTH,
+    PlantIdentification,
+    SubmissionUpdate,
+)
 from app.services.storage_service import StorageError, StoredFile
 from app.services.submission_service import (
     AlreadyReviewedError,
     SubmissionService,
-    _unknown_defaults,
     submission_fingerprint,
 )
 
@@ -118,6 +122,11 @@ class FakeSession:
         #: one-primary index or the `(plant_id, image_url)` key would fire.
         self.image_flush_error: Exception | None = None
         self.commit_error: Exception | None = None
+        #: Plants already in the library, by id, for approvals into one.
+        self.library: dict[int, Plant] = {}
+        #: What the duplicate-name lookup finds; None means the name is new.
+        self.duplicate_of: int | None = None
+        self.scalar_statements: list[Any] = []
 
     async def get(self, model: type, primary_key: Any) -> Any:
         """Undo expiry for the matching instance, as a real reload would."""
@@ -126,7 +135,13 @@ class FakeSession:
                 instance.__class__ = original
                 self.reloaded.append(primary_key)
                 return instance
+        if model is Plant:
+            return self.library.get(primary_key)
         return None
+
+    async def scalar(self, statement: Any) -> Any:
+        self.scalar_statements.append(statement)
+        return self.duplicate_of
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -290,6 +305,38 @@ def test_botanical_name_is_mandatory() -> None:
         PlantIdentification(botanical_name="")
 
 
+def test_approval_cannot_name_a_new_and_an_existing_plant_at_once() -> None:
+    with pytest.raises(ValidationError, match="not both"):
+        SubmissionUpdate(
+            status="approved",
+            expected_version="v1",
+            plant=PlantIdentification(botanical_name="X"),
+            plant_id=7,
+        )
+
+
+def test_an_existing_plant_alone_is_enough_to_approve() -> None:
+    SubmissionUpdate(status="approved", expected_version="v1", plant_id=7)
+
+
+def test_rejection_must_not_carry_a_plant_id() -> None:
+    with pytest.raises(ValidationError, match="only meaningful when approving"):
+        SubmissionUpdate(status="rejected", expected_version="v1", plant_id=7)
+
+
+def test_plant_id_must_be_a_real_id() -> None:
+    with pytest.raises(ValidationError):
+        SubmissionUpdate(status="approved", expected_version="v1", plant_id=0)
+
+
+def test_reviewer_notes_are_bounded() -> None:
+    """They are quoted in full in the contributor's email."""
+    limit = REVIEWER_NOTES_MAX_LENGTH
+    SubmissionUpdate(status="rejected", expected_version="v1", reviewer_notes="x" * limit)
+    with pytest.raises(ValidationError, match="at most 2000 characters"):
+        SubmissionUpdate(status="rejected", expected_version="v1", reviewer_notes="x" * (limit + 1))
+
+
 # ── approval ─────────────────────────────────────────────────────────────────
 
 
@@ -325,9 +372,7 @@ async def test_approval_creates_a_plant_and_promotes_photos(
 
 
 @pytest.mark.asyncio
-async def test_promoted_images_keep_one_primary(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_promoted_images_keep_one_primary(async_client: AsyncClient, review: Any) -> None:
     """The lead photo stays the lead photo in the plant library."""
     state = review()
     await async_client.patch(
@@ -364,20 +409,18 @@ async def test_promotion_yields_one_primary_whatever_the_submission_says(
     images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
     assert len(images) == len(flags)
     assert sum(1 for i in images if i.is_primary) == 1
-    # The caption follows the photo that ends up primary, not the stale flag.
-    assert [i.caption is not None for i in images] == [i.is_primary for i in images]
 
 
 @pytest.mark.asyncio
-async def test_only_the_primary_photo_gets_the_contributors_caption(
+async def test_promoted_photos_are_captioned_with_the_name_not_the_description(
     async_client: AsyncClient, review: Any
 ) -> None:
-    """The description belongs to the submission, not to each photograph.
+    """Regression: the contributor's description was published as a caption.
 
-    Copying it onto every promoted photo made a multi-photo approval render the
-    same sentence under three different pictures, which reads as a bug in the
-    gallery rather than as one description. Uncovered until now — the caption
-    was not asserted anywhere, so changing it broke no test.
+    It went out on the public plants endpoint exactly as typed — in production
+    as "Reported plant name: Test222\\r\\nTest222" — beside curated captions
+    that are all botanical names, and it is free text that can say where the
+    contributor lives. Every promoted photo now carries the plant's name.
     """
     state = review()
     await async_client.patch(
@@ -386,11 +429,9 @@ async def test_only_the_primary_photo_gets_the_contributors_caption(
     )
     images = [o for o in state["session"].added if type(o).__name__ == "PlantImage"]
 
-    primary = [i for i in images if i.is_primary]
-    rest = [i for i in images if not i.is_primary]
-    assert len(primary) == 1
-    assert primary[0].caption is not None
-    assert all(i.caption is None for i in rest)
+    assert len(images) == 2
+    assert [i.caption for i in images] == ["Nerium oleander", "Nerium oleander"]
+    assert all("creek" not in (i.caption or "") for i in images), "description leaked"
 
 
 @pytest.mark.asyncio
@@ -413,9 +454,7 @@ async def test_observed_location_is_carried_into_the_plant(
 
 
 @pytest.mark.asyncio
-async def test_reviewer_supplied_distribution_wins(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_reviewer_supplied_distribution_wins(async_client: AsyncClient, review: Any) -> None:
     """The fallback must not override an explicit answer."""
     state = review()
     await async_client.patch(
@@ -451,7 +490,7 @@ async def test_partial_objects_are_completed_with_unknown(
     plant = next(o for o in state["session"].added if isinstance(o, Plant))
 
     species = plant.toxicity_by_species
-    assert set(species) == set(_unknown_defaults()["toxicity_by_species"])
+    assert set(species) == set(unknown_defaults()["toxicity_by_species"])
     assert species["humans"] == "Toxic"
     assert species["notes"] == "seeds"
     assert {species[k] for k in species if k not in ("humans", "notes")} == {"Unknown"}
@@ -464,16 +503,14 @@ async def test_partial_objects_are_completed_with_unknown(
     }
 
     morph = plant.morphological_attributes
-    assert set(_unknown_defaults()["morphological_attributes"]) <= set(morph)
+    assert set(unknown_defaults()["morphological_attributes"]) <= set(morph)
     assert morph["height_m"] == 3
     assert morph["rhizome"] == "thick"
     assert morph["woodiness"] == "Unknown"
 
 
 @pytest.mark.asyncio
-async def test_missing_toxicity_data_is_flagged(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_missing_toxicity_data_is_flagged(async_client: AsyncClient, review: Any) -> None:
     """Publishing silence about toxicity should not be quiet."""
     state = review()
     response = await async_client.patch(
@@ -505,13 +542,136 @@ async def test_complete_identification_produces_no_warnings(
     assert response.json()["data"]["warnings"] == []
 
 
+# ── approving into a plant the library already has ───────────────────────────
+
+
+def _library_plant(plant_id: int = 7, *, has_cover: bool = True) -> Plant:
+    """A curated entry, as `db.get` returns it: images loaded with the row."""
+    plant = Plant(id=plant_id, botanical_name="Abrus precatorius", **unknown_defaults())
+    if has_cover:
+        cover = PlantImage(
+            id=1,
+            plant_id=plant_id,
+            image_url="https://proj.supabase.co/storage/v1/object/public/plant-images-v2/002.jpg",
+            caption="Abrus precatorius",
+            is_primary=True,
+        )
+        plant.images = [cover]
+    return plant
+
+
+def _promoted(state: dict[str, Any]) -> list[PlantImage]:
+    return [o for o in state["session"].added if isinstance(o, PlantImage)]
+
+
+@pytest.mark.asyncio
+async def test_approving_into_an_existing_plant_publishes_no_new_entry(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """Another observation of a known species joins its gallery."""
+    state = review()
+    state["session"].library[7] = _library_plant()
+
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}", json=_review(state, plant_id=7)
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["plant_id"] == 7
+    assert [o for o in state["session"].added if isinstance(o, Plant)] == [], "no new entry"
+    assert all(c["destination"].startswith("plant-images-v2/plants/7/") for c in state["copies"])
+    photos = _promoted(state)
+    assert len(photos) == 2 and {p.plant_id for p in photos} == {7}
+    assert [p.caption for p in photos] == ["Abrus precatorius", "Abrus precatorius"]
+
+
+@pytest.mark.asyncio
+async def test_joining_a_gallery_does_not_take_its_cover(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """A second primary would break `plant_images_v2_one_primary_per_plant`."""
+    state = review()
+    state["session"].library[7] = _library_plant(has_cover=True)
+
+    await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}", json=_review(state, plant_id=7)
+    )
+
+    assert [p.is_primary for p in _promoted(state)] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_a_plant_with_no_cover_left_takes_the_first_photo(
+    async_client: AsyncClient, review: Any
+) -> None:
+    state = review()
+    state["session"].library[7] = _library_plant(has_cover=False)
+
+    await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}", json=_review(state, plant_id=7)
+    )
+
+    assert [p.is_primary for p in _promoted(state)] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_plant_id_is_refused_before_anything_is_copied(
+    async_client: AsyncClient, review: Any
+) -> None:
+    state = review()
+
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}", json=_review(state, plant_id=999)
+    )
+
+    assert response.status_code == 422
+    assert "Plant 999 does not exist" in response.json()["message"]
+    assert state["copies"] == [] and state["session"].added == []
+
+
+@pytest.mark.asyncio
+async def test_a_second_entry_under_an_existing_name_is_a_409(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """Regression: every approval published a new entry, duplicates included."""
+    state = review()
+    state["session"].duplicate_of = 7
+
+    response = await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification(botanical_name="Abrus precatorius")),
+    )
+
+    assert response.status_code == 409
+    message = response.json()["message"]
+    assert "already exists (id 7)" in message and "plant_id" in message
+    assert state["copies"] == [] and state["session"].added == []
+
+
+@pytest.mark.asyncio
+async def test_the_duplicate_check_ignores_case_and_spacing(
+    async_client: AsyncClient, review: Any
+) -> None:
+    """ "nerium   OLEANDER" is the same plant as "Nerium oleander"."""
+    state = review()
+
+    await async_client.patch(
+        f"/api/v1/submissions/{SUBMISSION_ID}",
+        json=_review(state, plant=_identification(botanical_name="  nerium   OLEANDER ")),
+    )
+
+    (lookup,) = state["session"].scalar_statements
+    compiled = lookup.compile(dialect=postgresql.dialect())
+    assert "nerium oleander" in compiled.params.values()
+    sql = str(compiled).lower()
+    assert "lower(regexp_replace(btrim(plants_v2.botanical_name)" in sql
+
+
 # ── failure paths ────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_copy_failure_aborts_the_approval(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_copy_failure_aborts_the_approval(async_client: AsyncClient, review: Any) -> None:
     """A published plant with no photographs is worse than a failed review."""
     state = review(copy_fails=True)
     response = await async_client.patch(

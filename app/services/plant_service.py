@@ -3,10 +3,14 @@
 Everything the mobile screens need lives here:
 
 * `list_plants` — browse list, ordered by botanical name.
+* `count_plants` — how many rows that list holds, counted in SQL.
 * `get_plant` — full detail row (with images joined in).
 * `search_plants` — ranked search across name, family, origin, lethality,
   toxic parts, distribution, health effects, the toxicity profile and the
   toxin profile. Supports optional field-scoped search via `fields`.
+
+And the two admin writes: `update_plant` corrects an entry, `delete_plant`
+removes one.
 
 ## Searching the jsonb columns is not a text cast
 
@@ -38,14 +42,51 @@ from sqlalchemy import ColumnExpressionArgument, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.plant import TOXIC, TOXICITY_SPECIES, Plant
+from app.config import settings
+from app.db.like import contains_pattern
+from app.models.plant import TOXIC, TOXICITY_SPECIES, Plant, unknown_defaults
 from app.schemas.plant import SEARCHABLE_FIELDS
+from app.schemas.submission import PlantUpdate
+from app.services.storage_service import StorageService
+
+#: The jsonb columns `update_plant` merges key by key rather than replaces.
+_MERGED_OBJECTS = ("toxicity_by_species", "toxin_profile", "morphological_attributes")
 
 SEARCH_DEFAULT_LIMIT = 25
 
 
-def _escape_ilike(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+class DuplicatePlantError(ValueError):
+    """A plant with this botanical name is already in the library."""
+
+    def __init__(self, name: str, existing_id: int) -> None:
+        super().__init__(
+            f"A plant named '{name}' already exists (id {existing_id}). Add to it "
+            "with plant_id instead of publishing a second entry."
+        )
+        self.existing_id = existing_id
+
+
+def _comparable_name(column: Any) -> Any:
+    """`column` trimmed, inner whitespace collapsed, lowercased — in SQL."""
+    return func.lower(func.regexp_replace(func.btrim(column), r"\s+", " ", "g"))
+
+
+async def find_plant_named(
+    db: AsyncSession, name: str, *, exclude_id: int | None = None
+) -> int | None:
+    """The id of a plant already called `name`, ignoring case and spacing.
+
+    `plants_v2` has no unique constraint on the name, so this check is what
+    stops a second "Abrus precatorius" being published. Two requests creating
+    the same new name at the same instant can still both pass it; adding the
+    constraint would close that, at the cost of a schema change.
+    """
+    wanted = " ".join(name.split()).lower()
+    stmt = select(Plant.id).where(_comparable_name(Plant.botanical_name) == wanted)
+    if exclude_id is not None:
+        stmt = stmt.where(Plant.id != exclude_id)
+    found = await db.scalar(stmt.order_by(Plant.id).limit(1))
+    return int(found) if found is not None else None
 
 
 def _array_ilike(col: Any, like: str) -> ColumnExpressionArgument[bool]:
@@ -61,12 +102,17 @@ def _toxicity_ilike(like: str) -> ColumnExpressionArgument[bool]:
     it as toxic. `notes` is matched on its value instead, since it is prose.
     """
     kv = func.jsonb_each_text(Plant.toxicity_by_species).table_valued("key", "value").alias("tox")
-    return select(1).select_from(kv).where(
-        or_(
-            and_(kv.c.value == TOXIC, kv.c.key.ilike(like, escape="\\")),
-            and_(kv.c.key == "notes", kv.c.value.ilike(like, escape="\\")),
+    return (
+        select(1)
+        .select_from(kv)
+        .where(
+            or_(
+                and_(kv.c.value == TOXIC, kv.c.key.ilike(like, escape="\\")),
+                and_(kv.c.key == "notes", kv.c.value.ilike(like, escape="\\")),
+            )
         )
-    ).exists()
+        .exists()
+    )
 
 
 def _toxin_profile_ilike(like: str) -> ColumnExpressionArgument[bool]:
@@ -76,9 +122,7 @@ def _toxin_profile_ilike(like: str) -> ColumnExpressionArgument[bool]:
     `primary_class` and `secondary_class`.
     """
     kv = func.jsonb_each_text(Plant.toxin_profile).table_valued("key", "value").alias("prof")
-    return (
-        select(1).select_from(kv).where(kv.c.value.ilike(like, escape="\\")).exists()
-    )
+    return select(1).select_from(kv).where(kv.c.value.ilike(like, escape="\\")).exists()
 
 
 def _build_search_filters(like: str) -> dict[str, ColumnExpressionArgument[bool]]:
@@ -156,21 +200,99 @@ class PlantService:
 
     async def list_plants(self, limit: int | None = None) -> Sequence[Plant]:
         stmt = (
-            select(Plant)
-            .options(selectinload(Plant.images))
-            .order_by(Plant.botanical_name.asc())
+            select(Plant).options(selectinload(Plant.images)).order_by(Plant.botanical_name.asc())
         )
         if limit is not None:
             stmt = stmt.limit(limit)
         result = await self.db.execute(stmt)
         return result.scalars().all()
 
+    async def count_plants(self) -> int:
+        """The number of plants `list_plants` returns when given no limit."""
+        total = await self.db.scalar(select(func.count()).select_from(Plant))
+        return int(total or 0)
+
+    async def update_plant(self, plant_id: int, changes: PlantUpdate) -> Plant | None:
+        """Apply an admin correction; `None` if there is no such plant.
+
+        Only the fields the request sent are touched (`exclude_unset`). A field
+        sent blank arrives as `None` and goes back to the dataset's default,
+        `'Unknown'`, the same value an approval fills a gap with. The jsonb
+        objects are merged key by key, so correcting one species does not wipe
+        the other ten. A rename to a name another plant already has is
+        refused, as an approval would be.
+        """
+        plant = await self.db.get(Plant, plant_id)
+        if plant is None:
+            return None
+
+        sent = changes.model_dump(exclude_unset=True)
+        defaults = unknown_defaults()
+
+        name = sent.pop("botanical_name", None)
+        if name is not None:
+            duplicate = await find_plant_named(self.db, name, exclude_id=plant_id)
+            if duplicate is not None:
+                raise DuplicatePlantError(name, duplicate)
+            plant.botanical_name = name
+
+        for field, value in sent.items():
+            if field in _MERGED_OBJECTS and value is not None:
+                merged = dict(getattr(plant, field) or {})
+                for key, entry in value.items():
+                    if entry is not None:
+                        merged[key] = entry
+                    elif key in defaults[field]:
+                        merged[key] = defaults[field][key]
+                    else:
+                        # A key the dataset does not define (morphology is
+                        # open): clearing it removes it.
+                        merged.pop(key, None)
+                # A new object, not an in-place edit: SQLAlchemy only notices
+                # a jsonb change when the attribute is reassigned.
+                setattr(plant, field, merged)
+            else:
+                setattr(plant, field, value if value is not None else defaults[field])
+
+        await self.db.flush()
+        return plant
+
+    async def delete_plant(self, plant_id: int) -> list[str] | None:
+        """Delete a plant and its image rows; `None` if there is no such plant.
+
+        Returns the image URLs the rows held, so the caller can remove the
+        files once the deletion has committed — before that, a rollback would
+        leave rows pointing at photos that are gone.
+        """
+        plant = await self.db.get(Plant, plant_id)
+        if plant is None:
+            return None
+        urls = [image.image_url for image in plant.images]
+        # `Plant.images` cascades, so the image rows go with it.
+        await self.db.delete(plant)
+        await self.db.flush()
+        return urls
+
+    async def delete_photo_files(self, urls: list[str]) -> list[str]:
+        """Remove the files behind `urls`; returns the ones left in place.
+
+        Only files in this project's plant bucket are touched. Anything else —
+        another bucket, another host — is reported back rather than guessed at.
+        Never raises: the database change it cleans up after is already done.
+        """
+        storage = StorageService()
+        kept: list[str] = []
+        for url in urls:
+            key = storage.key_in_bucket(url, settings.SUPABASE_PLANT_BUCKET)
+            deleted = key is not None and await storage.delete_file(
+                key, bucket=settings.SUPABASE_PLANT_BUCKET
+            )
+            if not deleted:
+                kept.append(url)
+        return kept
+
     async def get_plant(self, plant_id: int) -> Plant | None:
-        stmt = (
-            select(Plant)
-            .options(selectinload(Plant.images))
-            .where(Plant.id == plant_id)
-        )
+        stmt = select(Plant).options(selectinload(Plant.images)).where(Plant.id == plant_id)
         result = await self.db.execute(stmt)
         return result.scalars().first()
 
@@ -188,13 +310,19 @@ class PlantService:
 
         Invalid field names are silently dropped. Empty / whitespace-only
         queries resolve to `[]`.
+
+        Every match is ranked before `limit` applies. Cutting in SQL first
+        kept the alphabetically first `limit` matches and ranked only those,
+        so a broad query lost its best hits: typing "an" returned none of the
+        five plants whose names start with "An". The table holds about a
+        hundred rows, so loading every match costs little; ranking in SQL
+        would mean reimplementing `_score_match` there.
         """
         query = raw_query.strip()
         if not query:
             return []
 
-        safe = _escape_ilike(query)
-        like = f"%{safe}%"
+        like = contains_pattern(query)
 
         all_filters = _build_search_filters(like)
 
@@ -205,19 +333,19 @@ class PlantService:
             if not selected:
                 return []
 
-        stmt = (
-            select(Plant)
-            .options(selectinload(Plant.images))
-            .where(or_(*selected))
-            .order_by(Plant.botanical_name.asc())
-            .limit(max(1, min(limit, 200)))
-        )
+        stmt = select(Plant).options(selectinload(Plant.images)).where(or_(*selected))
         result = await self.db.execute(stmt)
         rows = list(result.scalars().all())
 
         lowered = query.lower()
         rows.sort(key=lambda p: (-_score_match(p, lowered), (p.botanical_name or "").lower()))
-        return rows
+        return rows[: max(1, min(limit, 200))]
 
 
-__all__ = ["PlantService", "SEARCH_DEFAULT_LIMIT", "SEARCHABLE_FIELDS"]
+__all__ = [
+    "DuplicatePlantError",
+    "PlantService",
+    "SEARCH_DEFAULT_LIMIT",
+    "SEARCHABLE_FIELDS",
+    "find_plant_named",
+]
