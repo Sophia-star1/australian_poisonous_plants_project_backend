@@ -120,7 +120,7 @@ class StorageService:
             headers["Content-Type"] = content_type
         return headers
 
-    def _public_root(self) -> str:
+    def public_root(self) -> str:
         """Everything before ``/<bucket>/<key>`` in this backend's public URLs."""
         if self.backend == "s3":
             return self._s3_public
@@ -133,7 +133,7 @@ class StorageService:
         ``plant_images_v2.image_url``, so both libraries are addressed the
         same way.
         """
-        return f"{self._public_root()}/{bucket}/{key}"
+        return f"{self.public_root()}/{bucket}/{key}"
 
     @asynccontextmanager
     async def _s3(self) -> AsyncIterator[Any]:
@@ -284,9 +284,14 @@ class StorageService:
         return "exists"
 
     async def upload_bytes(
-        self, data: bytes, key: str, bucket: str, content_type: str
+        self, data: bytes, key: str, bucket: str, content_type: str, *, upsert: bool = False
     ) -> StoredFile:
-        """Store `data` at `key` inside `bucket`."""
+        """Store `data` at `key` inside `bucket`.
+
+        Supabase refuses to overwrite an existing key unless `upsert` is set;
+        S3 always overwrites. Uploads from the app use fresh random keys, so
+        only a re-runnable job such as the image migration needs `upsert`.
+        """
         if not self.enabled:
             logger.warning("storage_upload_skipped", bucket=bucket, key=key)
             return StoredFile(key=key, url=key)
@@ -306,7 +311,10 @@ class StorageService:
                 raise StorageError(f"Upload failed: {code}.") from exc
         else:
             url = f"{self.base_url}/storage/v1/object/{bucket}/{key}"
-            response = await self._post(url, self._headers(content_type), content=data)
+            headers = self._headers(content_type)
+            if upsert:
+                headers["x-upsert"] = "true"
+            response = await self._post(url, headers, content=data)
             if response.status_code >= 400:
                 logger.error(
                     "storage_upload_failed",
@@ -426,7 +434,7 @@ class StorageService:
         is safe to delete by: it never yields a key in a bucket you did not
         name, or for a file hosted somewhere else.
         """
-        root = self._public_root()
+        root = self.public_root()
         if not root:
             return None
         prefix = f"{root}/{bucket}/"
