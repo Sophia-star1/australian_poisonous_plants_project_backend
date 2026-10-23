@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT: int = 10
     SIGNUP_RATE_LIMIT: int = 5
     RATE_LIMIT_WINDOW_SECONDS: int = 300
+    #: Photo uploads — new submissions and photos added to one — per client IP,
+    #: and per account when signed in, in each window. Submitting needs no
+    #: account and one request may carry ten 10 MB photos, so without a limit
+    #: a single client could fill the storage (and its bill) unchecked.
+    SUBMISSION_RATE_LIMIT: int = 20
+    SUBMISSION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
     #: Escape hatch for load tests and local scripting. Never enable in prod.
     RATE_LIMIT_ENABLED: bool = True
 

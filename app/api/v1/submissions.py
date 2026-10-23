@@ -21,7 +21,7 @@ letting it change afterwards would leave an approved record nobody approved.
 
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, Request, UploadFile
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,7 @@ from app.core.exceptions import (
     NotFoundError,
     UnprocessableError,
 )
+from app.core.rate_limit import client_ip, enforce_rate_limit
 from app.db.session import get_db
 from app.dependencies import get_current_active_user, get_optional_user, require_admin
 from app.ml.classifier import ImageTooLargeError, UndecodableImageError
@@ -209,8 +210,23 @@ def _require_editable(submission: Submission, user: User) -> None:
         )
 
 
+async def _limit_uploads(request: Request, user: User | None) -> None:
+    """Count one upload request against the caller's IP, and account if signed in."""
+    identifiers = [f"ip:{client_ip(request)}"]
+    if user is not None:
+        identifiers.append(f"user:{user.id}")
+    await enforce_rate_limit(
+        "upload",
+        identifiers,
+        settings.SUBMISSION_RATE_LIMIT,
+        settings.SUBMISSION_RATE_LIMIT_WINDOW_SECONDS,
+        message="Too many uploads. Please wait before submitting again.",
+    )
+
+
 @router.post("/", response_model=ApiResponse[SubmissionOut], status_code=201)
 async def create_submission(
+    request: Request,
     photos: list[UploadFile] = File(..., description="Plant photos (jpg/png/webp, at least one)."),
     user_description: str = Form(""),
     contributor_name: str = Form(...),
@@ -248,7 +264,10 @@ async def create_submission(
     * `422` — unsupported file type, more than ten photographs, a file that is
       not a readable image, one that exceeds the size limit, or a photo that
       does not appear to be a plant.
+    * `429` — too many uploads from this address or account; see
+      `SUBMISSION_RATE_LIMIT`. `Retry-After` says when to try again.
     """
+    await _limit_uploads(request, current_user)
     _validate_photos(photos)
 
     if current_user is not None:
@@ -384,6 +403,7 @@ async def update_submission_content(
     status_code=201,
 )
 async def add_submission_photos(
+    request: Request,
     submission_id: UUID,
     photos: list[UploadFile] = File(..., description="Additional photos to attach."),
     db: AsyncSession = Depends(get_db),
@@ -407,7 +427,9 @@ async def add_submission_photos(
     * `422` — unsupported type, a file over the size limit, a file that is not
       a readable image, a photo that does not appear to be a plant, or the
       total would exceed ten.
+    * `429` — too many uploads; shares the budget of `POST /submissions/`.
     """
+    await _limit_uploads(request, current_user)
     if not photos:
         raise UnprocessableError("At least one photo is required.")
     # Per file only: the limit here is on the combined total, checked below

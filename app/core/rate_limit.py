@@ -1,4 +1,4 @@
-"""Fixed-window rate limiting for credential endpoints.
+"""Fixed-window rate limiting for the credential and upload endpoints.
 
 Two backends behind one interface:
 
@@ -19,7 +19,10 @@ of a sorted set, and the worst case (a burst straddling the boundary allows
 import time
 from dataclasses import dataclass, field
 
+from fastapi import Request
+
 from app.config import settings
+from app.core.exceptions import TooManyRequestsError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -129,3 +132,40 @@ def get_rate_limiter() -> InMemoryRateLimiter | RedisRateLimiter:
 def reset_rate_limiter() -> None:
     """Drop the singleton. Test helper — not used at runtime."""
     _holder.instance = None
+
+
+def client_ip(request: Request) -> str:
+    """Best-effort client IP.
+
+    Cloud Run terminates TLS at its front end, so `request.client.host` is the
+    load balancer. The first entry of X-Forwarded-For is the original caller.
+    It is spoofable in general, which is why login is also limited per
+    account and uploads per signed-in user, alongside the per-IP limits — an
+    attacker can rotate one or the other, but not both at once.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def enforce_rate_limit(
+    scope: str,
+    identifiers: list[str],
+    limit: int,
+    window_seconds: int | None = None,
+    message: str = "Too many attempts. Please wait before trying again.",
+) -> None:
+    """Raise 429 if any identifier has exhausted its budget for this window.
+
+    `window_seconds` defaults to RATE_LIMIT_WINDOW_SECONDS, the credential
+    endpoints' window.
+    """
+    if not settings.RATE_LIMIT_ENABLED:
+        return
+    limiter = get_rate_limiter()
+    window = window_seconds or settings.RATE_LIMIT_WINDOW_SECONDS
+    for identifier in identifiers:
+        result = await limiter.hit(f"rl:{scope}:{identifier}", limit, window)
+        if not result.allowed:
+            raise TooManyRequestsError(message, retry_after=result.retry_after)

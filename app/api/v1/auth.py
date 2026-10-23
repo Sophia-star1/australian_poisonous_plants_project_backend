@@ -14,8 +14,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.exceptions import TooManyRequestsError
-from app.core.rate_limit import get_rate_limiter
+from app.core.rate_limit import client_ip, enforce_rate_limit, get_rate_limiter
 from app.core.security import ACCESS_TOKEN_TYPE, REFRESH_TOKEN_TYPE, verify_token
 from app.core.token_denylist import get_denylist, seconds_until
 from app.db.session import get_db
@@ -36,40 +35,9 @@ from app.services.auth_service import AuthService
 router = APIRouter()
 
 
-def _client_ip(request: Request) -> str:
-    """Best-effort client IP.
-
-    Cloud Run terminates TLS at its front end, so `request.client.host` is the
-    load balancer. The first entry of X-Forwarded-For is the original caller.
-    It is spoofable in general, which is why the account-scoped limit below
-    exists alongside the IP-scoped one — an attacker can rotate one or the
-    other, but not both at once.
-    """
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
 def _account_key(email: str) -> str:
     """Hash the email so credential material never lands in Redis or logs."""
     return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:32]
-
-
-async def _enforce_rate_limit(scope: str, identifiers: list[str], limit: int) -> None:
-    """Raise 429 if any identifier has exhausted its budget for this window."""
-    if not settings.RATE_LIMIT_ENABLED:
-        return
-    limiter = get_rate_limiter()
-    for identifier in identifiers:
-        result = await limiter.hit(
-            f"rl:{scope}:{identifier}", limit, settings.RATE_LIMIT_WINDOW_SECONDS
-        )
-        if not result.allowed:
-            raise TooManyRequestsError(
-                "Too many attempts. Please wait before trying again.",
-                retry_after=result.retry_after,
-            )
 
 
 @router.post("/signup", response_model=ApiResponse[TokenResponse], status_code=201)
@@ -95,7 +63,7 @@ async def sign_up(
     * `422` — malformed address, or a password outside the length bounds.
     * `429` — 5 attempts per 5 minutes, counted per client address.
     """
-    await _enforce_rate_limit("signup", [f"ip:{_client_ip(request)}"], settings.SIGNUP_RATE_LIMIT)
+    await enforce_rate_limit("signup", [f"ip:{client_ip(request)}"], settings.SIGNUP_RATE_LIMIT)
     tokens = await AuthService(db).sign_up(payload)
     return ApiResponse.success(data=tokens, message="Account created.")
 
@@ -120,9 +88,9 @@ async def login(
       per account, so one account being attacked cannot lock out others from
       elsewhere. A successful sign-in clears that account's counter.
     """
-    ip_key = f"ip:{_client_ip(request)}"
+    ip_key = f"ip:{client_ip(request)}"
     account_key = f"acct:{_account_key(payload.email)}"
-    await _enforce_rate_limit("login", [ip_key, account_key], settings.LOGIN_RATE_LIMIT)
+    await enforce_rate_limit("login", [ip_key, account_key], settings.LOGIN_RATE_LIMIT)
 
     tokens = await AuthService(db).authenticate(payload)
 
