@@ -17,11 +17,26 @@ photos, which administrators review before they are published.
 - **Administration:** roles, plant corrections and deletion, screening
   thresholds.
 
+## Start here
+
+Step-by-step guides, written for readers with no technical background.
+Every command is given for Windows and Mac, with what it does and what you
+should see:
+
+| Guide | When |
+|---|---|
+| [Run on your computer](docs/run-on-your-computer.md) | Try everything out safely on a Windows or Mac computer. |
+| [Deploy on your own server](docs/deploy-on-your-own-server.md) | Put it online on one rented Linux server, with automatic HTTPS and nightly backups. |
+| [Deploy on Google Cloud](docs/deploy-on-google-cloud.md) | Put it online with managed services (Cloud Run and Supabase), with no server to look after. |
+| [Everyday tasks](docs/everyday-tasks.md) | Once it is online: reviewing submissions, managing plants and administrators, health checks. |
+
+Technical reference:
+
 | Document | For |
 |---|---|
-| This README | Developers: running it locally, the codebase, conventions |
-| [DEPLOY.md](DEPLOY.md) | Setting up a new deployment from scratch |
-| [OPERATIONS.md](OPERATIONS.md) | Running it: admins, reviewing, logs, backups, known issues |
+| This README | Developers: the API, local development, the codebase, conventions |
+| [DEPLOY.md](DEPLOY.md) | Every setting, storage option and deployment option in detail |
+| [OPERATIONS.md](OPERATIONS.md) | Operations background: privacy, logs, backups, security checklist, known issues |
 | `https://<api-host>/docs` | Every endpoint, with request and response schemas |
 
 ## Stack
@@ -177,7 +192,9 @@ sql/                     Schema changes on top of the hand-over schema, applied 
 schema/                  Where the hand-over schema SQL goes for Docker Compose (not committed)
 tests/                   pytest suite
 cloudbuild.yaml          Google Cloud Build: build → migrate → deploy to Cloud Run
-docker-compose.yml       Self-hosted stack: API, PostgreSQL, Redis, RustFS (S3)
+docker-compose.yml       Self-hosted stack: API, PostgreSQL, Redis, RustFS (S3), Caddy (HTTPS)
+deploy/                  Caddyfile (HTTPS and the read-only photo host) and backup.sh
+docs/                    Step-by-step guides for running, deploying and operating
 ```
 
 ### Conventions

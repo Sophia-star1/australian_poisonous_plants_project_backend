@@ -1,5 +1,12 @@
 # Deploying the APL backend
 
+> **New to this?** Start with the step-by-step guides instead, which
+> explain every command for Windows and Mac:
+> [run on your computer](docs/run-on-your-computer.md),
+> [deploy on your own server](docs/deploy-on-your-own-server.md), or
+> [deploy on Google Cloud](docs/deploy-on-google-cloud.md). This page is
+> the technical reference behind them.
+
 This guide takes a new owner from nothing to a running API on their own
 infrastructure. It does not assume Supabase or Google Cloud: any PostgreSQL
 database, any S3-compatible photo storage and any host that runs a Docker
@@ -313,6 +320,17 @@ a `.env` file that is never committed), not in code or in a build file.
 | `CONTRIBUTOR_TREE_STAGES`, `REVIEWER_BADGE_TIERS` | No | | Badge thresholds; see `.env.example`. The reviewer tiers are still placeholders. |
 | `SUPABASE_SUBMISSION_BUCKET`, `SUPABASE_PLANT_BUCKET`, `SUPABASE_AVATAR_BUCKET` | No | | Logical bucket names; the defaults match the existing data. |
 
+Read by `docker-compose.yml` only (not by the API):
+
+| Variable | Required | Secret | Purpose |
+|---|---|---|---|
+| `POSTGRES_PASSWORD`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY` | **Yes** | **Yes** | The stack's database password and storage credentials. Compose refuses to start without them. |
+| `PUBLIC_MEDIA_URL` | Yes | | Becomes `S3_PUBLIC_BASE_URL`: `http://localhost:9000/apl-media` locally, `https://MEDIA_DOMAIN/apl-media` on a server. |
+| `COMPOSE_PROFILES` | Server | | `https` starts Caddy. |
+| `API_DOMAIN`, `MEDIA_DOMAIN` | With `https` | | The two host names Caddy serves and gets certificates for. |
+| `API_PORT` | No | | The API's port on the machine itself (default 8000). |
+| `BACKUP_DIR` | No | | Where `deploy/backup.sh` writes (default `./backups`). |
+
 ## 8. Running it
 
 The image is built from the [`Dockerfile`](Dockerfile). It listens on `$PORT`
@@ -333,19 +351,24 @@ API documentation is served by the API itself at `/docs` (Swagger UI) and
 ### Option A: Docker Compose (one server)
 
 [`docker-compose.yml`](docker-compose.yml) runs everything on one machine:
-the API, PostgreSQL, Redis and [RustFS](https://github.com/rustfs/rustfs)
-(Apache-2.0, S3-compatible) for photos.
+the API, PostgreSQL, Redis, [RustFS](https://github.com/rustfs/rustfs)
+(Apache-2.0, S3-compatible) for photos, and on a server
+[Caddy](https://caddyserver.com) for automatic HTTPS. The full walkthrough is
+[docs/deploy-on-your-own-server.md](docs/deploy-on-your-own-server.md).
 
 ```bash
-git clone <repository-url> apl-backend && cd apl-backend
+git clone <repository-url> /opt/apl-backend && cd /opt/apl-backend
 cp .env.example .env
-# Edit .env: SECRET_KEY, SMTP_*, EMAIL_FROM, ALLOWED_ORIGINS, and the
-# "Docker Compose stack" section: POSTGRES_PASSWORD, STORAGE_ACCESS_KEY,
-# STORAGE_SECRET_KEY (letters and digits) and
-# PUBLIC_MEDIA_URL=https://media.example.org/apl-media
+# Edit .env: DEBUG=false, SECRET_KEY, ALLOWED_ORIGINS, SMTP_*/EMAIL_FROM, and
+# the "Docker Compose stack" section:
+#   POSTGRES_PASSWORD, STORAGE_ACCESS_KEY, STORAGE_SECRET_KEY (letters, digits)
+#   COMPOSE_PROFILES=https
+#   API_DOMAIN=api.example.org
+#   MEDIA_DOMAIN=media.example.org
+#   PUBLIC_MEDIA_URL=https://media.example.org/apl-media
 cp /path/to/handover/*.sql schema/
 docker compose up -d --build
-docker compose logs -f migrate app
+docker compose logs -f migrate app caddy
 ```
 
 On the first start PostgreSQL imports `schema/*.sql`; `storage-init` creates
@@ -355,15 +378,27 @@ on port 8000. Compose refuses to start while one of the required values is
 missing from `.env`. `schema/*.sql` is git-ignored: an export holds real
 user data and must not be committed.
 
-Put a reverse proxy with HTTPS in front (Caddy, nginx, Traefik), forwarding:
+**HTTPS.** With `COMPOSE_PROFILES=https`, the `caddy` service
+([deploy/Caddyfile](deploy/Caddyfile)) listens on ports 80 and 443 and
+obtains Let's Encrypt certificates for both domains by itself, once their
+DNS `A` records point at the server:
 
-- `https://api.example.org` → `localhost:8000` (the API)
-- `https://media.example.org` → `localhost:9000` (RustFS, photos); this is
-  the host in `PUBLIC_MEDIA_URL`
+- `https://API_DOMAIN` → the API;
+- `https://MEDIA_DOMAIN/apl-media/...` → the photos, `GET`/`HEAD` only.
+  Anything else on that host is refused, so the storage's S3 API is never
+  exposed.
 
-PostgreSQL and Redis are not published on host ports at all; use `docker
-compose exec postgres psql -U postgres apl_db` to reach the database. Only
-port 9000 of the storage is published, and its admin console is off.
+Without the profile (on a laptop), there is no Caddy: the API is at
+`http://localhost:8000` (`API_PORT` changes the port) and photos at
+`http://localhost:9000/apl-media`. Either way, the API and storage ports are
+bound to `127.0.0.1` only, and PostgreSQL and Redis are not published at all;
+use `docker compose exec postgres psql -U postgres apl_db` to reach the
+database. The storage's admin console is off.
+
+**Backups.** `sh deploy/backup.sh` writes a database dump and an
+incremental copy of every photo to `./backups` (database dumps older than
+14 days are deleted). Schedule it with cron; restoring is described in the
+server guide, section 16.
 
 To use Supabase or an external database or S3 service instead, delete the
 matching values from the `environment:` block in `docker-compose.yml` (they
@@ -401,8 +436,11 @@ builds the image, runs `python -m app.db.migrate` with it, then deploys it to
 Cloud Run. A Cloud Build trigger runs it on every push to `dev`.
 
 The file is set up for **Supabase** storage and the team's values (region
-`asia-southeast1`, the Supabase project URL, the SMTP mailbox). Change the
-`substitutions:` block to yours. The commands below are bash; in PowerShell
+`asia-southeast1`, the Supabase project URL, the SMTP mailbox, the website's
+origins). Change the `substitutions:` block at its end to yours; it holds
+every deployment-specific value, including `_ALLOWED_ORIGINS`. The full
+walkthrough is
+[docs/deploy-on-google-cloud.md](docs/deploy-on-google-cloud.md). The commands below are bash; in PowerShell
 replace the `\` line continuations with backticks.
 
 **1. Project and APIs**
