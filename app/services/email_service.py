@@ -38,7 +38,7 @@ from email.utils import formatdate, make_msgid, parseaddr
 import httpx
 
 from app.config import settings
-from app.core.logging import get_logger
+from app.core.logging import get_logger, mask_email
 
 logger = get_logger(__name__)
 
@@ -88,7 +88,7 @@ class EmailService:
         if not self.enabled:
             logger.info(
                 "email_not_sent",
-                to=email.to,
+                to=mask_email(email.to),
                 subject=email.subject,
                 reason="no mail credentials configured",
             )
@@ -153,7 +153,7 @@ class EmailService:
             logger.error(
                 "email_send_failed",
                 transport="smtp",
-                to=email.to,
+                to=mask_email(email.to),
                 subject=email.subject,
                 status=exc.smtp_code,
                 body=_decode(exc.smtp_error)[:300],
@@ -164,7 +164,7 @@ class EmailService:
             logger.error(
                 "email_send_error",
                 transport="smtp",
-                to=email.to,
+                to=mask_email(email.to),
                 subject=email.subject,
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -173,7 +173,7 @@ class EmailService:
         logger.info(
             "email_sent",
             transport="smtp",
-            to=email.to,
+            to=mask_email(email.to),
             subject=email.subject,
             message_id=message["Message-ID"],
         )
@@ -211,7 +211,7 @@ class EmailService:
             logger.error(
                 "email_send_error",
                 transport="resend",
-                to=email.to,
+                to=mask_email(email.to),
                 subject=email.subject,
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -221,7 +221,7 @@ class EmailService:
             logger.error(
                 "email_send_failed",
                 transport="resend",
-                to=email.to,
+                to=mask_email(email.to),
                 subject=email.subject,
                 status=response.status_code,
                 body=response.text[:300],
@@ -236,7 +236,7 @@ class EmailService:
         logger.info(
             "email_sent",
             transport="resend",
-            to=email.to,
+            to=mask_email(email.to),
             subject=email.subject,
             message_id=message_id,
         )
