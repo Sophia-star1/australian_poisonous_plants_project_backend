@@ -20,8 +20,6 @@ WORKDIR /app
 
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/app ./app
-COPY --from=builder /build/alembic ./alembic
-COPY --from=builder /build/alembic.ini ./alembic.ini
 # The migrations, so `python -m app.db.migrate` runs from the image itself:
 # cloudbuild.yaml applies them with this image before deploying it.
 COPY --from=builder /build/sql ./sql

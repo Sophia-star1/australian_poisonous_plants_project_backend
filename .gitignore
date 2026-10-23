@@ -40,10 +40,6 @@ htmlcov/
 # Docker
 docker-compose.override.yml
 
-# Alembic
-alembic/versions/*.py
-!alembic/versions/.gitkeep
-
 # Logs
 *.log
 logs/

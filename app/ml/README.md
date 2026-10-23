@@ -93,12 +93,11 @@ off, and callers read that as "no opinion" — never as a rejection. A checkout
 without the model still boots and still accepts uploads.
 
 `weights/` sits under `app/` deliberately. The runtime stage of the Dockerfile
-copies exactly three things:
+copies exactly two directories from the source tree:
 
 ```dockerfile
 COPY --from=builder /build/app ./app
-COPY --from=builder /build/alembic ./alembic
-COPY --from=builder /build/alembic.ini ./alembic.ini
+COPY --from=builder /build/sql ./sql
 ```
 
 A `models/` directory at the repository root would be built into the image and

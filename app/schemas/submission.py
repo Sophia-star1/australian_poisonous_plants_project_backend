@@ -45,10 +45,9 @@ def content_fingerprint(
     """A short digest of everything a reviewer looks at before deciding.
 
     Optimistic concurrency without a schema change. `submissions` has no
-    version column and the database is not managed by Alembic — no migration
-    history, no `alembic_version` table — so adding one means hand-editing
-    production. This asks the question directly instead: has any of what the
-    reviewer saw changed since they loaded it?
+    version column, and adding one would change the schema of every
+    deployment's database. This asks the question directly instead: has any
+    of what the reviewer saw changed since they loaded it?
 
     Photos are included because they are the part that matters most. A
     contributor swapping one while the reviewer reads would otherwise publish

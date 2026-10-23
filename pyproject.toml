@@ -1,7 +1,7 @@
 [project]
 name = "apl-backend"
 version = "0.1.0"
-description = "FastAPI enterprise-grade RESTful API scaffold"
+description = "REST API for the Australian Poisonous Plants app"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111",
@@ -11,7 +11,6 @@ dependencies = [
     "pydantic-settings>=2.0",
     "sqlalchemy>=2.0",
     "asyncpg",
-    "alembic",
     "python-jose[cryptography]",
     "bcrypt",
     "aioboto3",
@@ -42,7 +41,6 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
-    "celery[redis]",
 ]
 
 [dependency-groups]
@@ -54,7 +52,6 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
-    "celery[redis]",
 ]
 
 [tool.ruff]

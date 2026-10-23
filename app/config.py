@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     @field_validator(
         "DATABASE_URL",
         "REDIS_URL",
-        "CELERY_BROKER_URL",
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
         "AWS_ACCESS_KEY_ID",
@@ -238,9 +237,6 @@ class Settings(BaseSettings):
     #: Escape hatch for load tests and local scripting. Never enable in prod.
     RATE_LIMIT_ENABLED: bool = True
 
-    # --- Celery (optional) ---
-    CELERY_BROKER_URL: str = ""
-
     @property
     def redis_enabled(self) -> bool:
         """Check whether Redis is configured."""
@@ -272,11 +268,6 @@ class Settings(BaseSettings):
         if self.s3_storage_enabled:
             return "s3"
         return "none"
-
-    @property
-    def celery_enabled(self) -> bool:
-        """Check whether Celery broker is configured."""
-        return bool(self.CELERY_BROKER_URL)
 
 
 settings = Settings()
