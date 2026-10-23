@@ -63,9 +63,10 @@ steps:
       # to be listed here.
       #
       # The leading ^;^ switches the delimiter to ';' because ALLOWED_ORIGINS
-      # contains commas.
+      # contains commas. The values themselves are set under `substitutions:`
+      # at the end of this file.
       - "--set-env-vars"
-      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:8081","http://localhost:19006","http://aupoisonousplants.world","https://aupoisonousplants.world","http://www.aupoisonousplants.world","https://www.aupoisonousplants.world"];SUPABASE_URL=${_SUPABASE_URL};EMAIL_FROM=${_EMAIL_FROM};SMTP_HOST=${_SMTP_HOST};SMTP_PORT=${_SMTP_PORT};SMTP_USERNAME=${_SMTP_USERNAME}'
+      - '^;^APP_NAME=${_SERVICE_NAME};DEBUG=false;ALLOWED_ORIGINS=${_ALLOWED_ORIGINS};SUPABASE_URL=${_SUPABASE_URL};EMAIL_FROM=${_EMAIL_FROM};SMTP_HOST=${_SMTP_HOST};SMTP_PORT=${_SMTP_PORT};SMTP_USERNAME=${_SMTP_USERNAME}'
       # The Supabase secret key bypasses row level security: Secret Manager
       # only, never an env var and never a client bundle. The same goes for
       # SMTP_PASSWORD, the mailbox's password: anyone holding it can read and
@@ -78,8 +79,13 @@ steps:
       - "--set-secrets"
       - "SECRET_KEY=secret-key:latest,DATABASE_URL=database-url:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-secret-key:latest,RESEND_API_KEY=resend-api-key:latest,SMTP_PASSWORD=smtp-password:latest"
 
+# ── Settings for this deployment ─────────────────────────────────────────────
+# Everything a new owner changes is here. The step-by-step guide is
+# docs/deploy-on-google-cloud.md, step 6.
 substitutions:
   _SERVICE_NAME: apl-backend
+  # Google Cloud region for the service and its image repository, e.g.
+  # asia-southeast1 (Singapore) or australia-southeast1 (Sydney).
   _REGION: asia-southeast1
   _REPO_NAME: apl-backend
   # Not a secret — the project URL is already public in the mobile bundle.
@@ -95,6 +101,9 @@ substitutions:
   _SMTP_HOST: mail.privateemail.com
   _SMTP_PORT: "587"
   _SMTP_USERNAME: info@aupoisonousplants.world
+  # Web addresses allowed to call the API from a browser: the website. A
+  # JSON list, quoted as a whole. The mobile app needs no entry.
+  _ALLOWED_ORIGINS: '["http://localhost:3000","http://localhost:8081","http://localhost:19006","http://aupoisonousplants.world","https://aupoisonousplants.world","http://www.aupoisonousplants.world","https://www.aupoisonousplants.world"]'
 
 # Read by the migrate step only, from the same secrets the service mounts.
 # The build's service account already has secretAccessor on both.
