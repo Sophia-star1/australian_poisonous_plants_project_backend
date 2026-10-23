@@ -40,10 +40,6 @@ htmlcov/
 # Docker
 docker-compose.override.yml
 
-# Alembic
-alembic/versions/*.py
-!alembic/versions/.gitkeep
-
 # Logs
 *.log
 logs/
@@ -60,3 +56,6 @@ AI_CONTEXT.md
 CLAUDE.md
 mobile/
 
+
+# Hand-over database SQL for Docker Compose: contains real user data.
+schema/*.sql

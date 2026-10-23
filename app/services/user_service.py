@@ -25,9 +25,7 @@ class UserService:
 
     async def get_by_email(self, email: str) -> User | None:
         """Fetch a user by email address (case-insensitive)."""
-        result = await self.db.execute(
-            select(User).where(User.email == email.lower())
-        )
+        result = await self.db.execute(select(User).where(User.email == email.lower()))
         return result.scalars().first()
 
     async def list_users(
@@ -46,13 +44,7 @@ class UserService:
         total_stmt = select(func.count()).select_from(User).where(*filters)
         total = int((await self.db.execute(total_stmt)).scalar_one())
 
-        stmt = (
-            select(User)
-            .where(*filters)
-            .order_by(User.id.asc())
-            .offset(offset)
-            .limit(page_size)
-        )
+        stmt = select(User).where(*filters).order_by(User.id.asc()).offset(offset).limit(page_size)
         result = await self.db.execute(stmt)
         return result.scalars().all(), total
 

@@ -1,5 +1,7 @@
 """Application configuration via pydantic-settings."""
 
+from typing import Literal
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,12 +14,14 @@ class Settings(BaseSettings):
     @field_validator(
         "DATABASE_URL",
         "REDIS_URL",
-        "CELERY_BROKER_URL",
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_S3_ENDPOINT_URL",
+        "AWS_S3_BUCKET",
+        "AWS_REGION",
+        "S3_PUBLIC_BASE_URL",
         "SMTP_HOST",
         "SMTP_USERNAME",
         mode="after",
@@ -69,11 +73,32 @@ class Settings(BaseSettings):
     # --- Redis (optional) ---
     REDIS_URL: str = ""
 
-    # --- Object Storage (optional) ---
+    # --- Object storage: Supabase Storage or any S3-compatible service ---
+    #: Which storage backend to use. "auto" picks Supabase when SUPABASE_URL and
+    #: SUPABASE_SERVICE_ROLE_KEY are set, otherwise S3 when AWS_S3_BUCKET and
+    #: S3_PUBLIC_BASE_URL are set, otherwise none (uploads are discarded, with
+    #: a warning). Set it explicitly to make a misconfiguration fail loudly.
+    STORAGE_BACKEND: Literal["auto", "supabase", "s3"] = "auto"
+
+    # S3-compatible storage (AWS S3, Cloudflare R2, RustFS, ...). One bucket
+    # holds everything; the three logical buckets below become key prefixes in
+    # it, e.g. `avatars/users/7/<random>.jpg`.
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
+    #: The one physical bucket. Must already exist.
     AWS_S3_BUCKET: str = ""
+    #: Only for non-AWS services, e.g. https://<account>.r2.cloudflarestorage.com
+    #: or http://storage:9000. Empty means AWS itself.
     AWS_S3_ENDPOINT_URL: str = ""
+    #: e.g. ap-southeast-2. R2 uses "auto".
+    AWS_REGION: str = ""
+    #: Public base URL where the bucket's objects can be read, without a trailing
+    #: slash: `<S3_PUBLIC_BASE_URL>/<key>` must serve the object at `<key>`.
+    #: e.g. https://<bucket>.s3.<region>.amazonaws.com, an R2 public domain, a
+    #: CDN in front of the bucket, or http://<host>:9000/<bucket>. The bucket
+    #: (or the CDN) must allow anonymous reads; the app writes the URLs it
+    #: stores from this.
+    S3_PUBLIC_BASE_URL: str = ""
 
     # --- Supabase Storage ---
     #: Project URL, e.g. https://<ref>.supabase.co
@@ -209,11 +234,14 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT: int = 10
     SIGNUP_RATE_LIMIT: int = 5
     RATE_LIMIT_WINDOW_SECONDS: int = 300
+    #: Photo uploads — new submissions and photos added to one — per client IP,
+    #: and per account when signed in, in each window. Submitting needs no
+    #: account and one request may carry ten 10 MB photos, so without a limit
+    #: a single client could fill the storage (and its bill) unchecked.
+    SUBMISSION_RATE_LIMIT: int = 20
+    SUBMISSION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
     #: Escape hatch for load tests and local scripting. Never enable in prod.
     RATE_LIMIT_ENABLED: bool = True
-
-    # --- Celery (optional) ---
-    CELERY_BROKER_URL: str = ""
 
     @property
     def redis_enabled(self) -> bool:
@@ -221,9 +249,9 @@ class Settings(BaseSettings):
         return bool(self.REDIS_URL)
 
     @property
-    def storage_enabled(self) -> bool:
-        """Check whether object storage is configured."""
-        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_S3_BUCKET)
+    def s3_storage_enabled(self) -> bool:
+        """Check whether S3-compatible storage is configured."""
+        return bool(self.AWS_S3_BUCKET and self.S3_PUBLIC_BASE_URL)
 
     @property
     def supabase_storage_enabled(self) -> bool:
@@ -231,9 +259,21 @@ class Settings(BaseSettings):
         return bool(self.SUPABASE_URL and self.SUPABASE_SERVICE_ROLE_KEY)
 
     @property
-    def celery_enabled(self) -> bool:
-        """Check whether Celery broker is configured."""
-        return bool(self.CELERY_BROKER_URL)
+    def storage_backend(self) -> Literal["supabase", "s3", "none"]:
+        """The storage backend in use, resolving STORAGE_BACKEND="auto".
+
+        An explicit choice whose settings are missing resolves to "none", so
+        the service warns and discards rather than writing somewhere else.
+        """
+        if self.STORAGE_BACKEND == "supabase":
+            return "supabase" if self.supabase_storage_enabled else "none"
+        if self.STORAGE_BACKEND == "s3":
+            return "s3" if self.s3_storage_enabled else "none"
+        if self.supabase_storage_enabled:
+            return "supabase"
+        if self.s3_storage_enabled:
+            return "s3"
+        return "none"
 
 
 settings = Settings()

@@ -137,20 +137,14 @@ def _as_html(lines: list[str]) -> str:
     described as `<script>…` would otherwise arrive as markup rather than as
     the text somebody typed.
     """
-    paragraphs = [
-        f"<p style=\"margin:0 0 12px\">{html.escape(line)}</p>" for line in lines if line
-    ]
+    paragraphs = [f'<p style="margin:0 0 12px">{html.escape(line)}</p>' for line in lines if line]
     return (
         '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;'
-        'font-size:15px;line-height:1.55;color:#1f2933">'
-        + "".join(paragraphs)
-        + "</div>"
+        'font-size:15px;line-height:1.55;color:#1f2933">' + "".join(paragraphs) + "</div>"
     )
 
 
-async def notify_review(
-    outcome: ReviewOutcome, service: EmailService | None = None
-) -> bool:
+async def notify_review(outcome: ReviewOutcome, service: EmailService | None = None) -> bool:
     """Send the review notification. Returns whether it was delivered.
 
     Runs after the response and after the transaction has committed, so a

@@ -372,9 +372,7 @@ async def test_approval_creates_a_plant_and_promotes_photos(
 
 
 @pytest.mark.asyncio
-async def test_promoted_images_keep_one_primary(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_promoted_images_keep_one_primary(async_client: AsyncClient, review: Any) -> None:
     """The lead photo stays the lead photo in the plant library."""
     state = review()
     await async_client.patch(
@@ -456,9 +454,7 @@ async def test_observed_location_is_carried_into_the_plant(
 
 
 @pytest.mark.asyncio
-async def test_reviewer_supplied_distribution_wins(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_reviewer_supplied_distribution_wins(async_client: AsyncClient, review: Any) -> None:
     """The fallback must not override an explicit answer."""
     state = review()
     await async_client.patch(
@@ -514,9 +510,7 @@ async def test_partial_objects_are_completed_with_unknown(
 
 
 @pytest.mark.asyncio
-async def test_missing_toxicity_data_is_flagged(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_missing_toxicity_data_is_flagged(async_client: AsyncClient, review: Any) -> None:
     """Publishing silence about toxicity should not be quiet."""
     state = review()
     response = await async_client.patch(
@@ -658,7 +652,7 @@ async def test_a_second_entry_under_an_existing_name_is_a_409(
 async def test_the_duplicate_check_ignores_case_and_spacing(
     async_client: AsyncClient, review: Any
 ) -> None:
-    """"nerium   OLEANDER" is the same plant as "Nerium oleander"."""
+    """ "nerium   OLEANDER" is the same plant as "Nerium oleander"."""
     state = review()
 
     await async_client.patch(
@@ -677,9 +671,7 @@ async def test_the_duplicate_check_ignores_case_and_spacing(
 
 
 @pytest.mark.asyncio
-async def test_copy_failure_aborts_the_approval(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_copy_failure_aborts_the_approval(async_client: AsyncClient, review: Any) -> None:
     """A published plant with no photographs is worse than a failed review."""
     state = review(copy_fails=True)
     response = await async_client.patch(

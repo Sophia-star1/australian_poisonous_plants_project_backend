@@ -6,7 +6,12 @@ from functools import lru_cache
 from uuid import uuid4
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.config import settings
 
@@ -33,7 +38,7 @@ def _is_pooler(url: str) -> bool:
 
 
 @lru_cache(maxsize=1)
-def get_engine():
+def get_engine() -> AsyncEngine:
     """Create the async engine lazily on first use.
 
     Supabase's transaction pooler (port 6543) is pgbouncer in
@@ -46,6 +51,7 @@ def get_engine():
     # leaking the password.
     try:
         from sqlalchemy.engine.url import make_url
+
         parsed = make_url(url)
         logger.info(
             "DB engine init: dialect=%s host=%s port=%s db=%s",
@@ -80,7 +86,7 @@ def get_engine():
 
 
 @lru_cache(maxsize=1)
-def get_session_factory():
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
     """Create the session factory lazily on first use."""
     return async_sessionmaker(
         bind=get_engine(),

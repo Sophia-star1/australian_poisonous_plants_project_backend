@@ -1,0 +1,47 @@
+# Lint, type-check and test every pull request and every push to dev/main.
+# Deployment is separate: Cloud Build deploys dev on push (cloudbuild.yaml).
+# Mark the "checks" job as required in the branch protection rules so a red
+# build cannot be merged.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          # The version that writes uv.lock; keep in step when upgrading.
+          version: "0.11.14"
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies (exactly as locked)
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run --frozen ruff check app tests
+
+      - name: Formatting
+        run: uv run --frozen ruff format --check app tests
+
+      - name: Type check
+        run: uv run --frozen mypy app
+
+      - name: Tests
+        run: uv run --frozen pytest -q

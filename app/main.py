@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -34,6 +35,14 @@ READINESS_TIMEOUT_SECONDS = 10.0
 _PLACEHOLDER_SECRETS = frozenset({"", "change-me", "change-me-to-a-random-secret"})
 
 
+def app_version() -> str:
+    """The version in pyproject.toml, as installed; shown in /docs."""
+    try:
+        return version("apl-backend")
+    except PackageNotFoundError:  # running from a tree that was never installed
+        return "unknown"
+
+
 def refuse_placeholder_secret() -> None:
     """Stop a production server from starting with a known signing key.
 
@@ -61,17 +70,12 @@ def refuse_placeholder_secret() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
     refuse_placeholder_secret()
-
-    if settings.redis_enabled:
-        pass  # TODO: initialize Redis connection pool
-
-    if settings.storage_enabled:
-        pass  # TODO: initialize S3 client
-
+    # Redis needs no setup here: the rate limiter and the token denylist each
+    # connect on first use and log which backend they chose. Storage is
+    # resolved per request; logging the choice once makes a misconfigured
+    # deployment visible at a glance.
+    logger.info("storage_backend", backend=settings.storage_backend)
     yield
-
-    if settings.redis_enabled:
-        pass  # TODO: close Redis connection pool
 
 
 def create_app() -> FastAPI:
@@ -83,6 +87,7 @@ def create_app() -> FastAPI:
 
     application = FastAPI(
         title=settings.APP_NAME,
+        version=app_version(),
         debug=settings.DEBUG,
         lifespan=lifespan,
     )
@@ -93,8 +98,10 @@ def create_app() -> FastAPI:
     application.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
     # RequestValidationError, not the bare 422 status: FastAPI raises the
     # former for body/query validation and it otherwise bypasses the envelope.
+    # A status-code handler would also be wrong: Starlette consults those
+    # before exception classes, so a 422 `UnprocessableError` would land here
+    # and reach the client as "422: <detail>".
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
-    application.add_exception_handler(422, validation_exception_handler)
     # Last resort: keeps the {code, message, data} envelope intact for bugs.
     application.add_exception_handler(Exception, unhandled_exception_handler)
 

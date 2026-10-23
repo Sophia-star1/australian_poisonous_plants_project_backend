@@ -1,15 +1,26 @@
+# Runs the same tools, at the same locked versions, as CI (.github/workflows/
+# ci.yml). Local hooks rather than the upstream mirrors: those pin their own
+# ruff and mypy versions, and mypy in an isolated environment cannot see the
+# project's dependencies, so it reported errors CI would not.
+#
+#   uv run pre-commit install
+
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.0
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix]
+        name: ruff check
+        entry: uv run --frozen ruff check --fix
+        language: system
+        types: [python]
       - id: ruff-format
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.0
-    hooks:
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types: [python]
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.6
-          - pydantic-settings>=2.0
+        name: mypy
+        entry: uv run --frozen mypy app
+        language: system
+        types: [python]
+        pass_filenames: false

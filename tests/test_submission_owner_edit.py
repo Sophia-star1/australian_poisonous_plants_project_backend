@@ -396,9 +396,7 @@ async def test_owner_can_delete_a_photo_when_others_remain(
     as_user(_user())
     calls = stub_service(FakeSubmission(), photo_count=2)
 
-    response = await async_client.delete(
-        f"/api/v1/submissions/{SUBMISSION_ID}/photos/{PHOTO_ID}"
-    )
+    response = await async_client.delete(f"/api/v1/submissions/{SUBMISSION_ID}/photos/{PHOTO_ID}")
     assert response.status_code == 200
     assert calls["deleted"] == PHOTO_ID
 
@@ -411,9 +409,7 @@ async def test_last_photo_cannot_be_deleted(
     as_user(_user())
     stub_service(FakeSubmission(), photo_count=1)
 
-    response = await async_client.delete(
-        f"/api/v1/submissions/{SUBMISSION_ID}/photos/{PHOTO_ID}"
-    )
+    response = await async_client.delete(f"/api/v1/submissions/{SUBMISSION_ID}/photos/{PHOTO_ID}")
     assert response.status_code == 422
     assert "at least one photo" in response.json()["message"]
 
@@ -426,7 +422,5 @@ async def test_deleting_an_unknown_photo_is_404(
     as_user(_user())
     stub_service(FakeSubmission(), update_result=None, photo_count=3)
 
-    response = await async_client.delete(
-        f"/api/v1/submissions/{SUBMISSION_ID}/photos/{uuid4()}"
-    )
+    response = await async_client.delete(f"/api/v1/submissions/{SUBMISSION_ID}/photos/{uuid4()}")
     assert response.status_code == 404

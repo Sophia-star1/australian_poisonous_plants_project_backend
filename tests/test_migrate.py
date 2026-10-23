@@ -35,11 +35,20 @@ class _Transaction:
 class FakeConnection:
     """Enough of asyncpg.Connection, with transactions that commit or roll back."""
 
-    def __init__(self, ledger: set[str] | None = None, fail_on: str | None = None) -> None:
+    def __init__(
+        self,
+        ledger: set[str] | None = None,
+        fail_on: str | None = None,
+        tables: set[str] | None = None,
+        sequences: dict[str, tuple[int | None, int, bool]] | None = None,
+    ) -> None:
         self.ledger = set(ledger or ())
         self.pending: set[str] = set()
         self.fail_on = fail_on
         self.log: list[str] = []
+        self.tables = set(migrate.REQUIRED_TABLES) if tables is None else tables
+        #: table -> (max id, sequence last_value, is_called)
+        self.sequences = sequences or {}
 
     def transaction(self) -> _Transaction:
         return _Transaction(self)
@@ -58,7 +67,22 @@ class FakeConnection:
             self.log.append(f"RUN {sql.strip()}")
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
+        if "to_regclass" in sql:
+            return args[0].removeprefix("public.") in self.tables
+        if "pg_get_serial_sequence" in sql:
+            table = args[0].removeprefix("public.")
+            return f"public.{table}_id_seq" if table in self.sequences else None
+        if sql.startswith("SELECT max(id)"):
+            return self.sequences[sql.rsplit(".", 1)[1]][0]
+        if sql.startswith("SELECT setval"):
+            self.log.append(f"SETVAL {args[0]} {args[1]}")
+            return args[1]
         return 1 if args[0] in self.ledger else None
+
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
+        table = sql.rsplit("public.", 1)[1].removesuffix("_id_seq")
+        _, last_value, is_called = self.sequences[table]
+        return {"last_value": last_value, "is_called": is_called}
 
 
 @pytest.fixture
@@ -156,7 +180,76 @@ async def test_main_migrates_through_the_apps_own_engine(
     assert await migrate.main() == 0
 
     assert conn.ledger == {"001_a.sql", "002_b.sql", "003_c.sql"}
-    assert calls == ["connection closed", "engine disposed", "bucket avatars"]
+    assert calls == [
+        "connection closed",
+        "engine disposed",
+        "bucket submission-images",
+        "bucket plant-images-v2",
+        "bucket avatars",
+    ]
+
+
+# ── checks around the scripts ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_missing_hand_over_table_is_named_before_anything_runs() -> None:
+    conn = FakeConnection(tables={"plants_v2", "plant_images_v2", "app_users"})
+    with pytest.raises(migrate.SchemaMissingError, match="submissions, submission_images"):
+        await migrate.check_required_tables(conn)
+
+
+@pytest.mark.asyncio
+async def test_main_stops_with_an_error_when_the_schema_was_not_imported(
+    monkeypatch: pytest.MonkeyPatch, sql_dir: Path
+) -> None:
+    conn = FakeConnection(tables=set())
+
+    class _Raw:
+        driver_connection = conn
+
+    class _Connection:
+        async def __aenter__(self) -> _Connection:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            pass
+
+        async def get_raw_connection(self) -> _Raw:
+            return _Raw()
+
+    class _Engine:
+        def connect(self) -> _Connection:
+            return _Connection()
+
+        async def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(migrate, "get_engine", lambda: _Engine())
+    monkeypatch.setattr(migrate.apply_migrations, "__defaults__", (sql_dir,))
+
+    assert await migrate.main() == 1
+    assert conn.ledger == set() and not [e for e in conn.log if e.startswith("RUN")]
+
+
+@pytest.mark.asyncio
+async def test_sequences_left_behind_by_an_import_are_moved_forward_only() -> None:
+    conn = FakeConnection(
+        sequences={
+            "plants_v2": (124, 1, False),  # imported with ids, sequence untouched
+            "app_users": (40, 40, False),  # next value would be 40, which is taken
+            "plant_images_v2": (300, 410, True),  # healthy: ahead of the data
+            "submission_images": (None, 1, False),  # empty table
+        }
+    )
+
+    moved = await migrate.sync_id_sequences(conn)
+
+    assert moved == ["plants_v2", "app_users"]
+    assert [e for e in conn.log if e.startswith("SETVAL")] == [
+        "SETVAL public.plants_v2_id_seq 124",
+        "SETVAL public.app_users_id_seq 40",
+    ]
 
 
 # ── buckets ──────────────────────────────────────────────────────────────────

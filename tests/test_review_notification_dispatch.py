@@ -182,9 +182,7 @@ async def test_nothing_is_announced_before_it_is_written(
 
 
 @pytest.mark.asyncio
-async def test_an_approval_notifies_the_contributor(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_an_approval_notifies_the_contributor(async_client: AsyncClient, review: Any) -> None:
     state = review(plant=_plant())
     await async_client.patch(f"/api/v1/submissions/{SUBMISSION_ID}", json=_approve())
 
@@ -250,9 +248,7 @@ async def test_a_second_reviewer_losing_the_race_notifies_nobody(
 
 
 @pytest.mark.asyncio
-async def test_a_rejected_request_notifies_nobody(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_a_rejected_request_notifies_nobody(async_client: AsyncClient, review: Any) -> None:
     """Approving without an identification never reaches the service."""
     state = review(plant=_plant())
 
@@ -266,9 +262,7 @@ async def test_a_rejected_request_notifies_nobody(
 
 
 @pytest.mark.asyncio
-async def test_a_storage_failure_notifies_nobody(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_a_storage_failure_notifies_nobody(async_client: AsyncClient, review: Any) -> None:
     """The approval was abandoned, so there is nothing to announce."""
     from app.services.storage_service import StorageError
 
@@ -299,9 +293,7 @@ async def test_an_undelivered_message_does_not_change_the_response(
 
 
 @pytest.mark.asyncio
-async def test_a_stale_version_notifies_nobody(
-    async_client: AsyncClient, review: Any
-) -> None:
+async def test_a_stale_version_notifies_nobody(async_client: AsyncClient, review: Any) -> None:
     """Two features that landed separately, checked where they meet.
 
     The version guard and the notification were built on different branches

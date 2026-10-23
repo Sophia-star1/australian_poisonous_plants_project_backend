@@ -1,7 +1,7 @@
 [project]
 name = "apl-backend"
-version = "0.1.0"
-description = "FastAPI enterprise-grade RESTful API scaffold"
+version = "1.0.0"
+description = "REST API for the Australian Poisonous Plants app"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111",
@@ -11,7 +11,6 @@ dependencies = [
     "pydantic-settings>=2.0",
     "sqlalchemy>=2.0",
     "asyncpg",
-    "alembic",
     "python-jose[cryptography]",
     "bcrypt",
     "aioboto3",
@@ -42,7 +41,6 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
-    "celery[redis]",
 ]
 
 [dependency-groups]
@@ -54,7 +52,6 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
-    "celery[redis]",
 ]
 
 [tool.ruff]
@@ -63,6 +60,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+# UP046 asks for PEP 695 generics (`class ApiResponse[T](BaseModel)`). The
+# envelope models parametrise every response schema FastAPI publishes; the
+# rewrite buys nothing at runtime and is not worth the risk to the OpenAPI
+# output.
+ignore = ["UP046"]
 
 [tool.ruff.lint.flake8-bugbear]
 # B008 warns about function calls in argument defaults, which is precisely how
@@ -102,4 +104,12 @@ build-backend = "hatchling.build"
 # onnxruntime and pyvips ship no py.typed marker and no stubs on PyPI. Without
 # this the import alone is an error, which buries the errors that matter.
 module = ["onnxruntime.*", "pyvips.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# These ship no type information; stubs exist only as separate packages.
+# aioboto3/botocore: only app/services/storage_service.py imports them.
+# jose: app/core/security.py, whose wrappers declare the types they return.
+# yaml: app/ml/classifier.py reads one small config file.
+module = ["aioboto3", "botocore.*", "jose", "yaml"]
 ignore_missing_imports = true

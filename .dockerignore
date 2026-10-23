@@ -1,0 +1,28 @@
+# Kept out of `docker build` contexts (docker compose, a client's own CI).
+# Cloud Build reads .gcloudignore instead; keep the two in step.
+
+# A host virtualenv would land on /build/.venv in the builder stage and
+# replace the one `uv sync` just built for Linux.
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Secrets and local state.
+.env
+.env.*
+!.env.example
+.git/
+
+# Not needed to build or run.
+tests/
+schema/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.md
+
+# The TorchScript original of the model; the runtime loads only the ONNX graph.
+*.torchscript.pt

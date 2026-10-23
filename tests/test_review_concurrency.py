@@ -155,12 +155,20 @@ def test_the_version_is_short_enough_to_pass_around() -> None:
 def test_fields_cannot_bleed_into_each_other() -> None:
     """Concatenation without a separator would make ("ab","c") match ("a","bc")."""
     first = content_fingerprint(
-        contributor_name="ab", user_description="c", location_state=None,
-        latitude=None, longitude=None, photos=[],
+        contributor_name="ab",
+        user_description="c",
+        location_state=None,
+        latitude=None,
+        longitude=None,
+        photos=[],
     )
     second = content_fingerprint(
-        contributor_name="a", user_description="bc", location_state=None,
-        latitude=None, longitude=None, photos=[],
+        contributor_name="a",
+        user_description="bc",
+        location_state=None,
+        latitude=None,
+        longitude=None,
+        photos=[],
     )
     assert first != second
 
@@ -258,9 +266,7 @@ def _body(version: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_current_version_is_accepted(
-    async_client: AsyncClient, reviewing: Any
-) -> None:
+async def test_a_current_version_is_accepted(async_client: AsyncClient, reviewing: Any) -> None:
     row = _submission()
     reviewing(row)
 
@@ -285,9 +291,7 @@ async def test_a_stale_version_is_refused(async_client: AsyncClient, reviewing: 
 
 
 @pytest.mark.asyncio
-async def test_a_stale_review_publishes_nothing(
-    async_client: AsyncClient, reviewing: Any
-) -> None:
+async def test_a_stale_review_publishes_nothing(async_client: AsyncClient, reviewing: Any) -> None:
     """A refusal has to happen before the plant is created, not after."""
     row = _submission()
     stale = submission_fingerprint(row)
@@ -328,9 +332,7 @@ async def test_the_version_is_returned_with_the_submission(
 
 
 @pytest.mark.asyncio
-async def test_the_version_cannot_be_omitted(
-    async_client: AsyncClient, reviewing: Any
-) -> None:
+async def test_the_version_cannot_be_omitted(async_client: AsyncClient, reviewing: Any) -> None:
     """A guard a client can forget to send is not a guard."""
     reviewing(_submission())
 
