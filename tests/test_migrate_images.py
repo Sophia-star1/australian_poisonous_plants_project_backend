@@ -24,6 +24,9 @@ OLD = "https://old.supabase.co/storage/v1/object/public"
 NEW = "https://media.example.org"
 THUMB = "https://images.ala.org.au/image/abc.jpg"
 
+#: Objects in the fake S3 bucket, by full key; reset for every test.
+STORED: dict[str, bytes] = {}
+
 
 class FakeDb:
     """The image columns as {(table, column): {id: url}}; answers the script's SQL."""
@@ -31,12 +34,11 @@ class FakeDb:
     def __init__(self, tables: dict[tuple[str, str], dict[int, str | None]]) -> None:
         self.tables = tables
 
-    async def fetch(self, sql: str, pattern: str) -> list[dict[str, Any]]:
+    async def fetch(self, sql: str) -> list[dict[str, Any]]:
         match = re.search(r"SELECT id, (\w+) AS url FROM (\w+)", sql)
         assert match
-        marker = pattern.strip("%")
         rows = self.tables.get((match[2], match[1]), {})
-        return [{"id": i, "url": u} for i, u in sorted(rows.items()) if u and marker in u]
+        return [{"id": i, "url": u} for i, u in sorted(rows.items()) if u]
 
     async def execute(self, sql: str, new: str, row_id: int, old: str) -> None:
         match = re.search(r"UPDATE (\w+) SET (\w+) = \$1", sql)
@@ -58,12 +60,30 @@ def puts(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "s3")
     monkeypatch.setattr(settings, "AWS_S3_BUCKET", "apl-media")
     monkeypatch.setattr(settings, "S3_PUBLIC_BASE_URL", NEW)
+    STORED.clear()
     calls: list[dict[str, Any]] = []
+
+    class _Body:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        async def __aenter__(self) -> _Body:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            pass
+
+        async def read(self) -> bytes:
+            return self.data
 
     class _Client:
         async def put_object(self, **kwargs: Any) -> dict[str, Any]:
             calls.append(kwargs)
+            STORED[kwargs["Key"]] = kwargs["Body"]
             return {}
+
+        async def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            return {"Body": _Body(STORED[kwargs["Key"]]), "ContentType": "image/jpeg"}
 
     @asynccontextmanager
     async def _client(self: Any) -> AsyncIterator[_Client]:
@@ -146,7 +166,7 @@ async def test_a_second_run_changes_nothing(puts: list[dict[str, Any]]) -> None:
 
     again = await migrate_images.migrate_images(db, StorageService(), http)
 
-    assert (again.copied, again.already_moved, again.failed) == (0, 0, [])
+    assert (again.copied, again.already_moved, again.failed) == (0, 4, [])
     assert len(puts) == uploads
 
 
@@ -241,3 +261,94 @@ async def test_supabase_uploads_overwrite_only_when_asked(monkeypatch: pytest.Mo
     await service.upload_bytes(b"x", "a.jpg", "avatars", "image/jpeg", upsert=True)
 
     assert [r.headers.get("x-upsert") for r in seen] == [None, "true"]
+
+
+# ── metadata ─────────────────────────────────────────────────────────────────
+
+
+def _jpeg_with_gps() -> bytes:
+    import io
+
+    from PIL import Image
+
+    exif = Image.Exif()
+    exif[0x010F] = "PhoneMaker"
+    exif.get_ifd(0x8825).update({1: "S", 2: (35.0, 16.0, 50.0)})
+    out = io.BytesIO()
+    Image.new("RGB", (16, 16), "green").save(out, "JPEG", exif=exif)
+    return out.getvalue()
+
+
+def _serving(photos: dict[str, bytes]) -> tuple[httpx.AsyncClient, list[str]]:
+    fetched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetched.append(str(request.url))
+        return httpx.Response(
+            200, content=photos[str(request.url)], headers={"content-type": "image/jpeg"}
+        )
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), fetched
+
+
+@pytest.mark.asyncio
+async def test_a_moved_photo_loses_its_location_on_the_way(puts: list[dict[str, Any]]) -> None:
+    source = f"{OLD}/plant-images-v2/gps.jpg"
+    db = FakeDb({("plant_images_v2", "image_url"): {1: source}})
+    http, _ = _serving({source: _jpeg_with_gps()})
+
+    await migrate_images.migrate_images(db, StorageService(), http)
+
+    assert b"PhoneMaker" not in puts[0]["Body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True], ids=["for real", "dry run"])
+async def test_photos_already_here_are_cleaned_in_place_when_asked(
+    puts: list[dict[str, Any]], dry_run: bool
+) -> None:
+    with_gps = f"{NEW}/plant-images-v2/plants/1/gps.jpg"
+    clean = f"{NEW}/submission-images/submissions/2/clean.jpg"
+    db = FakeDb(
+        {
+            ("plant_images_v2", "image_url"): {1: with_gps},
+            ("submission_images", "image_url"): {2: clean},
+        }
+    )
+    import io
+
+    from PIL import Image
+
+    plain = io.BytesIO()
+    Image.new("RGB", (16, 16), "green").save(plain, "JPEG")
+    STORED["plant-images-v2/plants/1/gps.jpg"] = _jpeg_with_gps()
+    STORED["submission-images/submissions/2/clean.jpg"] = plain.getvalue()
+    http, fetched = _serving({})
+
+    report = await migrate_images.migrate_images(
+        db, StorageService(), http, dry_run=dry_run, strip_in_place=True
+    )
+
+    assert report.stripped == 1
+    # Read through the storage API, never this server's own public URL.
+    assert fetched == []
+    if dry_run:
+        assert puts == []
+    else:
+        # Same key, so the URL in the row stays valid; only the dirty one is rewritten.
+        assert [p["Key"] for p in puts] == ["plant-images-v2/plants/1/gps.jpg"]
+        assert b"PhoneMaker" not in puts[0]["Body"]
+    assert db.tables[("plant_images_v2", "image_url")] == {1: with_gps}
+
+
+@pytest.mark.asyncio
+async def test_without_the_flag_photos_already_here_are_not_downloaded(
+    puts: list[dict[str, Any]],
+) -> None:
+    here = f"{NEW}/plant-images-v2/plants/1/gps.jpg"
+    db = FakeDb({("plant_images_v2", "image_url"): {1: here}})
+    http, fetched = _serving({here: _jpeg_with_gps()})
+
+    report = await migrate_images.migrate_images(db, StorageService(), http)
+
+    assert (report.already_moved, report.stripped, fetched, puts) == (1, 0, [], [])

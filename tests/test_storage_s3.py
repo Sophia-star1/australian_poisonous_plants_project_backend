@@ -259,3 +259,48 @@ async def test_the_client_targets_the_configured_service(
     assert seen["region_name"] == "ap-southeast-2"
     assert seen["aws_access_key_id"] == "AKIA_TEST"
     assert seen["config"].s3 == style
+
+
+# ── reading back ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_download_reads_through_the_api_not_the_public_url(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server may not be able to reach its own public address."""
+
+    class _Body:
+        async def __aenter__(self) -> _Body:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            pass
+
+        async def read(self) -> bytes:
+            return b"jpeg"
+
+    calls: list[dict[str, Any]] = []
+
+    class _Client:
+        async def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {"Body": _Body(), "ContentType": "image/jpeg"}
+
+    @asynccontextmanager
+    async def _client(self: Any) -> AsyncIterator[_Client]:
+        yield _Client()
+
+    monkeypatch.setattr(StorageService, "_s3", _client)
+
+    data, ctype = await StorageService().download_bytes("plants/1/a.jpg", "plant-images-v2")
+
+    assert (data, ctype) == (b"jpeg", "image/jpeg")
+    assert calls == [{"Bucket": BUCKET, "Key": "plant-images-v2/plants/1/a.jpg"}]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_download_raises_a_storage_error(s3: Any) -> None:
+    s3(get_object=_client_error("NoSuchKey"))
+    with pytest.raises(StorageError, match="NoSuchKey"):
+        await StorageService().download_bytes("missing.jpg", "avatars")

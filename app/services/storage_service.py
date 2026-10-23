@@ -399,6 +399,39 @@ class StorageService:
             key=destination_key, url=self.public_url(destination_bucket, destination_key)
         )
 
+    async def download_bytes(self, key: str, bucket: str) -> tuple[bytes, str]:
+        """The object at `key` in `bucket`, and its content type.
+
+        S3 reads through the API rather than the public URL: a server cannot
+        always reach its own public address (no NAT hairpinning, a CDN that
+        blocks it), and the API needs no public access at all. Supabase reads
+        the public URL, the buckets being public.
+
+        Raises:
+            StorageError: storage is not configured, or the read failed.
+        """
+        if not self.enabled:
+            raise StorageError("No storage is configured.")
+        if self.backend == "s3":
+            try:
+                async with self._s3() as s3:
+                    found = await s3.get_object(
+                        Bucket=settings.AWS_S3_BUCKET, Key=f"{bucket}/{key}"
+                    )
+                    async with found["Body"] as body:
+                        data = await body.read()
+            except _S3_ERRORS as exc:
+                raise StorageError(f"Download failed: {_s3_error_code(exc)}.") from exc
+            return data, str(found.get("ContentType") or "application/octet-stream")
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(self.public_url(bucket, key))
+        except httpx.HTTPError as exc:
+            raise StorageError(f"Download failed: {type(exc).__name__}.") from exc
+        if response.status_code != 200:
+            raise StorageError(f"Download failed with HTTP {response.status_code}.")
+        return response.content, response.headers.get("content-type", "application/octet-stream")
+
     async def delete_file(self, key: str, bucket: str | None = None) -> bool:
         """Remove an object. Returns False rather than raising on failure.
 
