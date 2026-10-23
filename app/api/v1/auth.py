@@ -19,7 +19,7 @@ from app.core.rate_limit import get_rate_limiter
 from app.core.security import ACCESS_TOKEN_TYPE, REFRESH_TOKEN_TYPE, verify_token
 from app.core.token_denylist import get_denylist, seconds_until
 from app.db.session import get_db
-from app.dependencies import get_current_active_user, oauth2_scheme
+from app.dependencies import bearer_token, get_current_active_user
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -157,7 +157,7 @@ async def refresh_tokens(
 @router.post("/logout", response_model=ApiResponse[None])
 async def logout(
     payload: LogoutRequest | None = None,
-    token: str | None = Depends(oauth2_scheme),
+    token: str | None = Depends(bearer_token),
 ) -> ApiResponse[None]:
     """Sign out: revoke the presented access token and, if given, the refresh token.
 
