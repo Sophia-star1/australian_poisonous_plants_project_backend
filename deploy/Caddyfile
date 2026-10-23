@@ -1,0 +1,31 @@
+# Caddy: HTTPS in front of the API and the photos (docker-compose.yml, the
+# "caddy" service). Caddy obtains and renews certificates from Let's Encrypt
+# by itself, as soon as both domains point at this server and ports 80 and
+# 443 are open.
+#
+# API_DOMAIN and MEDIA_DOMAIN come from .env, e.g. api.example.org and
+# media.example.org. Set PUBLIC_MEDIA_URL=https://<MEDIA_DOMAIN>/apl-media.
+
+# The API.
+{$API_DOMAIN} {
+	encode gzip
+	reverse_proxy app:8000
+}
+
+# The photos: read-only. Storage is an S3 server, so anything but reading a
+# photo (listing, uploading, deleting, even with credentials) is refused
+# here; the API reaches storage directly, inside Docker.
+{$MEDIA_DOMAIN} {
+	@photo {
+		method GET HEAD
+		path /apl-media/*
+	}
+	handle @photo {
+		reverse_proxy storage:9000 {
+			header_up Host {upstream_hostport}
+		}
+	}
+	handle {
+		respond 404
+	}
+}
