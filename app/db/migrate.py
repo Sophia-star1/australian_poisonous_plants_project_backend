@@ -50,6 +50,17 @@ PUBLIC_BUCKETS = (
     settings.SUPABASE_AVATAR_BUCKET,
 )
 
+#: Tables the hand-over schema must create. sql/ only changes them, so a
+#: missing one means the schema was not imported (DEPLOY.md, section 3.1) —
+#: and for `submissions` / `submission_images`, which no script touches,
+#: nothing else would notice until the first upload failed in production.
+REQUIRED_TABLES = ("plants_v2", "plant_images_v2", "submissions", "submission_images", "app_users")
+
+
+class SchemaMissingError(RuntimeError):
+    """Tables the backend needs do not exist."""
+
+
 _LEDGER = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename   text PRIMARY KEY,
@@ -79,6 +90,47 @@ async def apply_migrations(conn: Any, sql_dir: Path = SQL_DIR) -> list[str]:
     return applied
 
 
+async def check_required_tables(conn: Any) -> None:
+    """Raise `SchemaMissingError` naming every required table that is absent."""
+    missing = [
+        table
+        for table in REQUIRED_TABLES
+        if not await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}")
+    ]
+    if missing:
+        raise SchemaMissingError(
+            f"Missing tables: {', '.join(missing)}. Import the database schema SQL "
+            "from the hand-over before deploying (DEPLOY.md, section 3.1)."
+        )
+
+
+async def sync_id_sequences(conn: Any) -> list[str]:
+    """Move each id sequence past the largest id already used; returns those moved.
+
+    A schema imported with its data inserts rows with explicit ids, which
+    leaves the sequences behind: the next sign-up or new plant would be given
+    an id that is taken, and fail with a duplicate key. Sequences only ever
+    move forward here, so running this on a healthy database does nothing.
+    Tables whose id is not sequence-backed (submissions use UUIDs) are skipped.
+    """
+    moved: list[str] = []
+    for table in REQUIRED_TABLES:
+        sequence = await conn.fetchval("SELECT pg_get_serial_sequence($1, 'id')", f"public.{table}")
+        if sequence is None:
+            continue
+        highest = await conn.fetchval(f"SELECT max(id) FROM public.{table}")
+        if highest is None:
+            continue
+        # `sequence` comes from pg_get_serial_sequence, already quoted.
+        state = await conn.fetchrow(f"SELECT last_value, is_called FROM {sequence}")
+        upcoming = state["last_value"] + 1 if state["is_called"] else state["last_value"]
+        if upcoming <= highest:
+            await conn.fetchval("SELECT setval($1, $2)", sequence, highest)
+            logger.info("id_sequence_moved", table=table, sequence=sequence, now_after=highest)
+            moved.append(table)
+    return moved
+
+
 async def main() -> int:
     engine = get_engine()
     try:
@@ -87,7 +139,13 @@ async def main() -> int:
             # several statements need its simple-query execute, which the
             # SQLAlchemy layer does not offer.
             raw = await connection.get_raw_connection()
+            try:
+                await check_required_tables(raw.driver_connection)
+            except SchemaMissingError as exc:
+                logger.error("schema_missing", detail=str(exc))
+                return 1
             applied = await apply_migrations(raw.driver_connection)
+            await sync_id_sequences(raw.driver_connection)
     finally:
         await engine.dispose()
     logger.info("migrations_done", applied=applied or "none new")
